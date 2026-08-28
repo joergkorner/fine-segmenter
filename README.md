@@ -51,6 +51,26 @@ flights, ±0.03. Flights without a table row use the `_general` row.
 Both runs parallelise with `--part k/n`; part tables merge with
 `polarmaker.py --join "part*.csv"`.
 
+## Running it for someone else
+
+If you hold an archive and someone asks you to compress it for them, the two
+runs above are all there is to do, and **two files** come out:
+
+| | |
+|---|---|
+| `polars.csv` | one small table, a few hundred bytes — one line per glider type |
+| `states.txt` | one line per flight; with `--delta` and `xz -6` about 364 bytes per flying hour |
+
+Send those two. Nothing else is needed, and nothing else should be sent: the
+IGC files stay where they are. Every line is readable by eye before it leaves
+the house — no pilot names, and in `polars.csv` no positions or times at all.
+The glider type is the only thing carried over from the IGC header; it is
+what the sink polar is fitted per, and without it every flight falls back to
+the `_general` row.
+
+`polars.csv` belongs with the shipment: the header line of `states.txt`
+records its SHA1, so the recipient can check which table was used.
+
 ## The output line
 
 ```
