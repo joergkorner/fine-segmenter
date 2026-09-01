@@ -15,46 +15,62 @@ data, not lost between climbs. No classes: maps colour continuously from `w`.
 `flightstates.py` runs on its own; needs `numpy`, `pandas`, `scipy`. No maps,
 no weather, no network.
 
-## Two runs
+## The runs
 
 Removing the glider's own sink from the vario needs a sink polar per glider
-type. Run 1 measures it; you can inspect the result before run 2 touches
-anything.
+type. It is measured first and inspected before the segmenter runs. On a
+big or foreign archive, measure a sample first and look at it:
 
 ```bash
 pip install numpy pandas scipy
-python3 polarmaker.py "flights/**/*.IGC" --out polars.csv --min 50
-python3 flightstates.py --delta "flights/**/*.IGC" > states.txt
+
+python3 polarmaker.py "flights/**/*.IGC" --part 1/10 --out probe.npz   # 1  sample
+python3 polarmaker.py --join probe.npz --out probe.csv --min 5         #    look at probe.csv + probe_stat.csv
+python3 polarmaker.py "flights/**/*.IGC" --out polars.csv --min 50     # 2  the polar table
+python3 flightstates.py --delta "flights/**/*.IGC" > states.txt        # 3  the segmented flights
 ```
 
-What the pieces mean:
+On a small archive of your own, step 1 can be skipped. What the pieces mean:
 
 * `"flights/**/*.IGC"` — replace `flights` with the folder holding your IGC
   files; `**` searches all subfolders. The quotes are required (the script
   expands the pattern itself; case of `.igc` doesn't matter). Several
-  patterns may be given. Duplicate file names are processed once.
-* `--out polars.csv` — where run 1 writes its table.
+  patterns may be given. Duplicate files (same name and size) are
+  processed once.
 * `--min 50` — a glider type gets its own row only with at least 50 flights.
 * `--delta` — compact numbers (recommended); without it, plain numbers.
-* `> states.txt` — run 2 prints to standard output; `>` puts it in a file.
-* `--polars FILE` (run 2) — which table to use; default: `polars.csv` next
+* `> states.txt` — the segmenter prints to standard output; `>` puts it in
+  a file.
+* `--polars FILE` (step 3) — which table to use; default: `polars.csv` next
   to the script. `--id TEXT` — what to write in the first field (default `P`).
 
 `polars.csv` is one small table: per glider type, own sink at 25–65 km/h,
-measured as the mode of the vario per band (the most common air on a glide is
-near-still air). **No positions, no times, no pilots** — every line readable
-by eye. Glider type comes from `HFGTY`; names are normalised but digits are
-never touched, and rare typo variants fall below `--min` on their own.
-Per single flight the sink estimate scatters 0.21 m/s; per type at 50+
-flights, ±0.03. Flights without a table row use the `_general` row.
+measured as the mode of the vario per band (the most common air on a glide
+is near-still air). Values that measured air instead of glider — slow
+flight spent in ridge lift does this — are discarded by physics and
+stability checks (thresholds and their justification: header of
+`polarmaker.py`). **No positions, no times, no pilots** — every line
+readable by eye. Glider type comes from `HFGTY`; names are normalised but
+digits are never touched. Per single flight the sink estimate scatters
+0.21 m/s; per type at 50+ flights, ±0.03. Flights without a table row use
+the `_general` row; the line marks it (`pol` field: `g` own row, `a`
+general).
 
-Both runs parallelise with `--part k/n`; part tables merge with
-`polarmaker.py --join "part*.csv"`.
+Next to the table, `polars_stat.csv` records **every band of every glider**
+— kept or discarded, with the reason and a 90 % confidence interval from a
+bootstrap over flights. Which glider types to trust (or blacklist) can be
+decided later from this file and the `.npz` sample dumps alone, without
+touching the IGC files again.
+
+Both runs parallelise with `--part k/n`. Polar parts write `.npz`;
+`--join "teil*.npz"` builds the table, identical to a single pass.
+Segmenter parts are plain text; `cat` them. Memory stays small: per flight
+only a 4 KB histogram is kept, never the raw seconds.
 
 ## Running it for someone else
 
-If you hold an archive and someone asks you to compress it for them, the two
-runs above are all there is to do, and **two files** come out:
+If you hold an archive and someone asks you to compress it for them, the
+steps above are all there is to do, and **two files** come out:
 
 | | |
 |---|---|

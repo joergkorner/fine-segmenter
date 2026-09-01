@@ -29,13 +29,33 @@ are never touched and no fuzzy matching is done — "zeolite gt" and
 "zeolite 2 gt" are different gliders. Typos stay separate rows and fall
 below the --min threshold on their own.
 
+Discarding spoiled cells: two rules keep venue-biased corpora (e.g. a
+competition wing flown only at one ridge site, in lift, on a task clock)
+from writing air into the polar. (1) Physics floor SINK_MIN: no paraglider
+sinks less than 0.85 m/s in straight flight — a cell above that measured
+lift, not the glider. (2) Bimodality gates: where the bootstrap whisker is
+wider than BREITE_MAX, or more than BODEN_MAX of the bootstrap draws hits
+the physics floor, the mode jumps between a still-air and a lift peak and
+the cell is discarded as unstable. Whole-flight filtering was measured and rejected: the share of
+rising slow seconds overlaps too much between clean and spoiled corpora
+(0.31/0.38/0.44 for zeolite2/zeno2/enzo3), and it would discard the
+flights' perfectly good fast-band seconds with them.
+
+Whiskers: beside the table a sidecar polars_stat.csv is written — per kept
+cell the 90 % interval of a flight-cluster bootstrap (see bootstrap_stats).
+polars.csv itself stays byte-identical in format; nothing downstream changes.
+Parts dump per-flight histograms (.npz); --join merges them and builds the
+table with the full statistics and gates — identical machinery to a single
+pass. Memory stays small either way: per flight only a 4 KB histogram is
+kept, never the raw seconds.
+
     python3 polarmaker.py "flights/**/*.IGC" --out polars.csv
-    python3 polarmaker.py "flights/**/*.IGC" --part 2/4 --out part2.csv
-    python3 polarmaker.py --join "part*.csv" --out polars.csv
+    python3 polarmaker.py "flights/**/*.IGC" --part 2/4 --out teil2.npz
+    python3 polarmaker.py --join "teil*.npz" --out polars.csv
 
 Dependencies: numpy, pandas, scipy, and flightstates.py beside this file.
 """
-import argparse, glob, re, sys
+import argparse, glob, json, re, sys, zlib
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +65,23 @@ import flightstates as fs                                    # noqa: E402
 
 SPEEDS = list(range(25, 66, 5))          # band centres, km/h (width 5)
 MIN_SEC_CELL = 3000                      # seconds needed before a cell is written
+SINK_MIN = -0.85                         # physics floor: no paraglider sinks less
+                                         # in straight flight — a cell above this
+                                         # measured the AIR (ridge lift), not the
+                                         # glider, and is discarded
+BREITE_MAX = 0.75                        # bimodality gate: a cell whose 90 %
+                                         # bootstrap interval is wider than this
+                                         # has a mode that jumps between two
+                                         # peaks (still air vs lift) and is
+                                         # discarded. Measured gap in the
+                                         # archive: healthy cells <= 0.68,
+                                         # pathological ones >= 0.85
+BODEN_MAX = 0.05                         # stability gate: if more than this
+                                         # share of bootstrap draws hits the
+                                         # physics floor, the still-air peak is
+                                         # not dominant enough to trust the
+                                         # cell. Measured gap: healthy cells
+                                         # 0.00, spoiled ones 0.07-0.33
 
 ALIAS = {"ozon": "ozone", "adv": "advance", "nivuk": "niviuk"}
 
@@ -73,10 +110,30 @@ def seconds_of(path):
     return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32)
 
 
+KANTEN = np.arange(-6, 4.001, 0.05)      # the one histogram grid everything uses
+
+
 def mode_of(v, width=0.05):
     """The most common value, parabola-refined over a smoothed histogram."""
-    k = np.arange(-6, 4.001, width)
-    h, _ = np.histogram(v, bins=k)
+    h, _ = np.histogram(v, bins=KANTEN)
+    return mode_from_hist(h, KANTEN, width)
+
+
+def hist_of(e, v):
+    """One flight -> (band x bin) uint16 histogram. All later maths — mode,
+    bootstrap, gates — needs only this; the raw seconds are never kept, so
+    memory stays a few KB per flight even on a 100k-flight archive. uint16
+    is safe: no flight has 65535 seconds in one band and bin."""
+    H = np.zeros((len(SPEEDS), len(KANTEN) - 1), np.uint16)
+    for i, c in enumerate(SPEEDS):
+        m = (e >= c - 2.5) & (e < c + 2.5)
+        if m.any():
+            H[i] = np.histogram(v[m], bins=KANTEN)[0]
+    return H
+
+
+def mode_from_hist(h, k, width=0.05):
+    """mode_of, but starting from a ready-made histogram on the grid k."""
     h = np.convolve(h, np.ones(5) / 5.0, "same")
     i = int(np.argmax(h))
     if 0 < i < len(h) - 1:
@@ -88,16 +145,80 @@ def mode_of(v, width=0.05):
     return k[i] + width * (0.5 + c)
 
 
+B_BOOT = 200                             # bootstrap draws for the whiskers
+
+
+def bootstrap_stats(HL, rng):
+    """Flight-cluster bootstrap of the per-band mode -> whisker data.
+
+    Seconds within one flight share the same air, trim and speed-bar style
+    and are heavily correlated; resampling seconds would give absurdly
+    narrow intervals. The resampling unit is therefore the FLIGHT: draw
+    flights with replacement, sum their per-band histograms, take the mode
+    again — with the same MIN_SEC_CELL and slow-band anchor rule applied
+    per draw. Returns per band (lo5, hi95, kept_share) over B_BOOT draws,
+    or None where the cell survived too few draws to be quoted.
+    """
+    width = 0.05
+    k = KANTEN
+    H = np.stack(HL)                     # (flights x bands x bins), uint16
+    F = H.shape[0]
+    nb = len(SPEEDS)
+    zieh = [[] for _ in SPEEDS]
+    boden = [0] * nb                     # draws in which the mode hit the floor
+    for _ in range(B_BOOT):
+        w = np.bincount(rng.integers(0, F, F), minlength=F).astype(np.int64)
+        hs = np.tensordot(w, H, axes=1)  # = H[idx].sum(0), but fast at 100k
+        werte = []
+        for i in range(nb):
+            werte.append(mode_from_hist(hs[i], k, width)
+                         if hs[i].sum() >= MIN_SEC_CELL else None)
+        for i in range(nb):
+            if werte[i] is not None and werte[i] > SINK_MIN:
+                werte[i] = None                       # physics floor, per draw
+                boden[i] += 1
+        anker = werte[SPEEDS.index(35)]
+        for i, c in enumerate(SPEEDS):
+            if c < 35 and werte[i] is not None:
+                if anker is None or werte[i] > anker + 0.25:
+                    werte[i] = None
+        for i in range(nb):
+            if werte[i] is not None:
+                zieh[i].append(werte[i])
+    aus = []
+    for i in range(nb):
+        z = sorted(zieh[i])
+        if len(z) >= B_BOOT // 5:
+            aus.append((z[int(0.05 * (len(z) - 1))],
+                        z[int(0.95 * (len(z) - 1))],
+                        len(z) / B_BOOT,
+                        boden[i] / B_BOOT))
+        else:
+            aus.append(None)
+    return aus
+
+
 def write_table(dest, sammel, min_flights):
     rows = []
-    for name, (fl, ee, vv) in sammel.items():
-        if not name or len(fl) < min_flights or not len(ee):
+    stat = []                        # whisker sidecar, one line per kept cell
+    for name, (nf, HL, LE) in sammel.items():
+        if not name or nf < min_flights or not HL:
             continue
-        e = np.concatenate(ee); v = np.concatenate(vv)
+        Hs = np.zeros((len(SPEEDS), len(KANTEN) - 1), np.int64)
+        for h in HL:
+            Hs += h
         werte = []
-        for c in SPEEDS:
-            m = (e >= c - 2.5) & (e < c + 2.5)
-            werte.append(mode_of(v[m]) if m.sum() >= MIN_SEC_CELL else None)
+        for i, c in enumerate(SPEEDS):
+            werte.append(mode_from_hist(Hs[i], KANTEN)
+                         if Hs[i].sum() >= MIN_SEC_CELL else None)
+        roh = list(werte)          # before any gate — the sidecar keeps all
+        grund = ["" if w is not None else "duenn" for w in werte]
+        # Physics floor: a mode above SINK_MIN measured the air, not the
+        # glider (competition flights ridge-soaring at slow speed do this).
+        for i in range(len(SPEEDS)):
+            if werte[i] is not None and werte[i] > SINK_MIN:
+                werte[i] = None
+                grund[i] = "boden"
         # Below 35 km/h the most common air is ridge lift, not still air, and
         # the mode can land on the lift instead of the glider. A slow cell is
         # kept only if it agrees with the 35 band to 0.25 m/s.
@@ -106,9 +227,42 @@ def write_table(dest, sammel, min_flights):
             if c < 35 and werte[i] is not None:
                 if anker is None or werte[i] > anker + 0.25:
                     werte[i] = None
+                    grund[i] = "anker"
+        # Bimodality gates: where the bootstrap interval is wider than
+        # BREITE_MAX, or more than BODEN_MAX of the draws hit the physics
+        # floor, the mode jumps between a still-air and a lift peak — the
+        # cell is not a property of the glider and is discarded.
+        # the same corpus gives the same whiskers, no matter how it was
+        # processed: seed from the glider name, and put the flights into a
+        # canonical order first (a joined run lists them differently than a
+        # single pass)
+        ordnung = sorted(range(len(HL)),
+                         key=lambda f: (LE[f], HL[f].tobytes()))
+        HL = [HL[f] for f in ordnung]
+        rng = np.random.default_rng(zlib.crc32(name.encode()))
+        st = bootstrap_stats(HL, rng)
+        for i in range(len(SPEEDS)):
+            if werte[i] is not None and st[i] is not None:
+                lo, hi, _teil, geboden = st[i]
+                if hi - lo > BREITE_MAX or geboden > BODEN_MAX:
+                    werte[i] = None
+                    grund[i] = "breite" if hi - lo > BREITE_MAX else "instabil"
         cells = ["" if w is None else f"{w:.2f}" for w in werte]
         if sum(1 for c in cells if c) >= 3:
-            rows.append((name, len(fl), int(len(e)), cells))
+            rows.append((name, nf, int(sum(LE)), cells))
+        # The sidecar keeps EVERYTHING — every band of every glider, kept or
+        # discarded, with the reason. The final pick/blacklist of glider
+        # types is decided later, from this file (or the .npz dumps), with
+        # all numbers on the table; the main table is only today's default.
+        for i, c in enumerate(SPEEDS):
+            m0 = "" if roh[i] is None else f"{roh[i]:.2f}"
+            if st[i] is not None:
+                lo, hi, teil, geboden = st[i]
+                rest = f"{lo:.2f};{hi:.2f};{teil:.2f};{geboden:.2f}"
+            else:
+                rest = ";;;"
+            stat.append(f"{name};{nf};{c};{m0};{rest};"
+                        f"{int(Hs[i].sum())};{grund[i] or 'ok'}")
     rows.sort(key=lambda r: -r[1])
     with open(dest, "w", encoding="utf-8") as f:
         f.write("# flightstates polar table 1.1\n")
@@ -118,6 +272,19 @@ def write_table(dest, sammel, min_flights):
         for name, nf, nl, cells in rows:
             f.write(f"{name};{nf};{nl};" + ";".join(cells) + "\n")
     print(f"{dest}: {len(rows)} rows, {Path(dest).stat().st_size} bytes")
+    # Sidecar: the COMPLETE statistical record — every band of every glider,
+    # kept or discarded (status ok/boden/anker/breite/instabil/duenn), with
+    # the 90 % flight-bootstrap interval. A later pick or blacklist of
+    # glider types is decided from this file; nothing is thrown away here.
+    stat_dest = re.sub(r"\.csv$", "", dest) + "_stat.csv"
+    with open(stat_dest, "w", encoding="utf-8") as f:
+        f.write("# flightstates polar whiskers 1.0 — flight-cluster bootstrap, "
+                f"{B_BOOT} draws, 90 % interval\n")
+        f.write("glider;flights;band_kmh;mode;lo5;hi95;kept;floored;"
+                "seconds_band;status\n")
+        for z in stat:
+            f.write(z + "\n")
+    print(f"{stat_dest}: {len(stat)} cells, {Path(stat_dest).stat().st_size} bytes")
 
 
 def main():
@@ -133,54 +300,66 @@ def main():
     a = ap.parse_args()
 
     if a.join:
-        # merge part tables: per cell the second-weighted mean of the modes
-        agg = {}
+        # merge part dumps (.npz with per-flight histograms) and build the
+        # table with the FULL machinery — statistics and gates identical to
+        # a single pass. (Old CSV part tables cannot be merged this way.)
+        sammel = {}
         for part in sorted(glob.glob(a.join)):
-            for z in open(part, encoding="utf-8"):
-                if z.startswith("#") or z.startswith("glider;"):
-                    continue
-                f = z.rstrip("\n").split(";")
-                name, nf, ns = f[0], int(f[1]), int(f[2])
-                e = agg.setdefault(name, [0, 0, [[0.0, 0] for _ in SPEEDS]])
-                e[0] += nf; e[1] += ns
-                for i, cell in enumerate(f[3:]):
-                    if cell:
-                        e[2][i][0] += float(cell) * ns; e[2][i][1] += ns
-        with open(a.out, "w", encoding="utf-8") as f:
-            f.write("# flightstates polar table 1.1 (joined)\n")
-            f.write("glider;flights;seconds;" + ";".join(str(c) for c in SPEEDS) + "\n")
-            for name, (nf, ns, cells) in sorted(agg.items(), key=lambda z: -z[1][0]):
-                if nf < a.min:
-                    continue
-                f.write(f"{name};{nf};{ns};" + ";".join(
-                    f"{c[0]/c[1]:.2f}" if c[1] else "" for c in cells) + "\n")
-        print(f"{a.out} written")
+            z = np.load(part)
+            keys = json.loads(str(z["namen"]))
+            for i, k in enumerate(keys):
+                H = z[f"h{i}"]; L = z[f"l{i}"]
+                g = sammel.setdefault(k, [0, [], []])
+                g[0] += H.shape[0]
+                g[1].extend(H)
+                g[2].extend(int(x) for x in L)
+        write_table(a.out, sammel, a.min)
         return
 
     files = []
     for g in a.globs:
         files += glob.glob(g, recursive=True)
+    # duplicates: same NAME AND SIZE is the same file twice. (Name alone
+    # would silently drop different flights that happen to share a file
+    # name — real in large foreign archives.)
     einmal = {}
     for d in sorted(files):
-        einmal.setdefault(Path(d).name, d)
+        try:
+            gr = Path(d).stat().st_size
+        except OSError:
+            continue
+        einmal.setdefault((Path(d).name, gr), d)
     files = sorted(einmal.values())
     k, n = (int(x) for x in a.part.split("/"))
     files = files[k - 1::n]
 
-    sammel = {}                # name -> (set of flight idx, [eig], [vario])
-    ae, av = [], []
+    sammel = {}                # name -> [flights, [flight histograms], [seconds]]
     for i, p in enumerate(files, 1):
         try:
             name, e, v = seconds_of(p)
         except Exception as err:
             print(f"# {Path(p).name}: {type(err).__name__}: {err}", file=sys.stderr)
             continue
-        fl, ee, vv = sammel.setdefault(name, (set(), [], []))
-        fl.add(i); ee.append(e); vv.append(v)
-        ae.append(e); av.append(v)
+        H = hist_of(e, v)
+        for nm in (name, "_general"):
+            g = sammel.setdefault(nm, [0, [], []])
+            g[0] += 1
+            g[1].append(H)             # same object twice — no copy
+            g[2].append(int(len(e)))
         if i % 100 == 0:
             print(f"  {i}/{len(files)}", file=sys.stderr)
-    sammel["_general"] = (set(range(len(files))), ae, av)
+    if n > 1:
+        # a part writes no table — it dumps its per-flight histograms, and
+        # --join builds the table with full statistics and gates.
+        dest = a.out if a.out.endswith(".npz") else re.sub(r"\.csv$", "", a.out) + ".npz"
+        arrs = {"namen": np.array(json.dumps(list(sammel)))}
+        for i, k2 in enumerate(sammel):
+            nf, HL, LE = sammel[k2]
+            arrs[f"h{i}"] = np.stack(HL)
+            arrs[f"l{i}"] = np.array(LE, np.int64)
+        np.savez_compressed(dest, **arrs)
+        print(f"{dest}: part {k}/{n}, {len(files)} files — merge with --join")
+        return
     write_table(a.out, sammel, a.min)
 
 
