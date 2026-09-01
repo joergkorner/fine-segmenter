@@ -198,6 +198,18 @@ def bootstrap_stats(HL, rng):
     return aus
 
 
+def dump_schreiben(dest, sammel):
+    """Per-flight histograms of every glider -> one compressed .npz.
+    Counts only: no positions, no times, no pilots."""
+    arrs = {"namen": np.array(json.dumps(list(sammel)))}
+    for i, k2 in enumerate(sammel):
+        nf, HL, LE = sammel[k2]
+        arrs[f"h{i}"] = np.stack(HL)
+        arrs[f"l{i}"] = np.array(LE, np.int64)
+    np.savez_compressed(dest, **arrs)
+    print(f"{dest}: raw per-flight histograms, {Path(dest).stat().st_size} bytes")
+
+
 def write_table(dest, sammel, min_flights):
     rows = []
     stat = []                        # whisker sidecar, one line per kept cell
@@ -314,6 +326,8 @@ def main():
                 g[1].extend(H)
                 g[2].extend(int(x) for x in L)
         write_table(a.out, sammel, a.min)
+        # the merged raw record, same as a single pass would ship
+        dump_schreiben(re.sub(r"\.csv$", "", a.out) + ".npz", sammel)
         return
 
     files = []
@@ -352,15 +366,14 @@ def main():
         # a part writes no table — it dumps its per-flight histograms, and
         # --join builds the table with full statistics and gates.
         dest = a.out if a.out.endswith(".npz") else re.sub(r"\.csv$", "", a.out) + ".npz"
-        arrs = {"namen": np.array(json.dumps(list(sammel)))}
-        for i, k2 in enumerate(sammel):
-            nf, HL, LE = sammel[k2]
-            arrs[f"h{i}"] = np.stack(HL)
-            arrs[f"l{i}"] = np.array(LE, np.int64)
-        np.savez_compressed(dest, **arrs)
+        dump_schreiben(dest, sammel)
         print(f"{dest}: part {k}/{n}, {len(files)} files — merge with --join")
         return
     write_table(a.out, sammel, a.min)
+    # The raw statistical record always ships with the table: per-flight
+    # histograms of every glider, below --min included. From this file every
+    # later selection or re-check can be computed without the IGCs.
+    dump_schreiben(re.sub(r"\.csv$", "", a.out) + ".npz", sammel)
 
 
 if __name__ == "__main__":

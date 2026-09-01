@@ -25,8 +25,8 @@ big or foreign archive, measure a sample first and look at it:
 pip install numpy pandas scipy
 
 python3 polarmaker.py "flights/**/*.IGC" --part 1/10 --out probe.npz   # 1  sample
-python3 polarmaker.py --join probe.npz --out probe.csv --min 5         #    look at probe.csv + probe_stat.csv
-python3 polarmaker.py "flights/**/*.IGC" --out polars.csv --min 50     # 2  the polar table
+python3 polarmaker.py --join probe.npz --out probe.csv                 #    look at probe.csv + probe_stat.csv
+python3 polarmaker.py "flights/**/*.IGC" --out polars.csv              # 2  the polar table
 python3 flightstates.py --delta "flights/**/*.IGC" > states.txt        # 3  the segmented flights
 ```
 
@@ -37,7 +37,6 @@ On a small archive of your own, step 1 can be skipped. What the pieces mean:
   expands the pattern itself; case of `.igc` doesn't matter). Several
   patterns may be given. Duplicate files (same name and size) are
   processed once.
-* `--min 50` — a glider type gets its own row only with at least 50 flights.
 * `--delta` — compact numbers (recommended); without it, plain numbers.
 * `> states.txt` — the segmenter prints to standard output; `>` puts it in
   a file.
@@ -70,19 +69,23 @@ only a 4 KB histogram is kept, never the raw seconds.
 ## Running it for someone else
 
 If you hold an archive and someone asks you to compress it for them, the
-steps above are all there is to do, and **two files** come out:
+steps above are all there is to do, and **four files** come out:
 
 | | |
 |---|---|
-| `polars.csv` | one small table, a few hundred bytes — one line per glider type |
+| `polars.csv` | one small table — one line per glider type |
+| `polars_stat.csv` | the statistics behind it: every band of every glider, confidence interval, kept or discarded with reason |
+| `polars.npz` | the raw per-flight histograms behind the statistics — pure counts |
 | `states.txt` | one line per flight; with `--delta` and `xz -6` about 364 bytes per flying hour |
 
-Send those two. Nothing else is needed, and nothing else should be sent: the
-IGC files stay where they are. Every line is readable by eye before it leaves
-the house — no pilot names, and in `polars.csv` no positions or times at all.
-The glider type is the only thing carried over from the IGC header; it is
-what the sink polar is fitted per, and without it every flight falls back to
-the `_general` row.
+Send all four; the recipient needs the statistics to judge — and if need be
+override — every polar decision. Nothing else should be sent: the IGC files
+stay where they are. The text files are readable by eye before they leave
+the house — no pilot names, and in the polar files no positions or times at
+all; `polars.npz` holds nothing but count tables per glider type. The
+glider type is the only thing carried over from the IGC header; it is what
+the sink polar is fitted per, and without it every flight falls back to the
+`_general` row.
 
 `polars.csv` belongs with the shipment: the header line of `states.txt`
 records its SHA1, so the recipient can check which table was used.
@@ -174,8 +177,8 @@ wait; cat part*.txt | xz -6 > states.txt.xz
 
 | | |
 |---|---|
-| `flightstates.py` | run 2 — the segmenter, self-contained |
-| `polarmaker.py` | run 1 — sink polar per glider type |
+| `flightstates.py` | the segmenter (step 3), self-contained |
+| `polarmaker.py` | sink polar per glider type, with statistics (steps 1–2) |
 | `polars.csv` | the shipped table (774 flights); replace with your own |
 | `verify.py`, `chart.py` | check picture, day plate |
 | `example_line.txt`, `example_line_delta.txt` | one flight, both forms |
