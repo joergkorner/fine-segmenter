@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-polarmaker.py — run 1 of 2: measure the effective sink polar per glider type.
+polarmaker.py — measure the effective sink polar per glider type.
 
-Reads IGC files and writes ONE small table (polars.csv) and nothing else:
-per glider type, the glider's sink at airspeeds 25-65 km/h, measured from the
-glide legs of all its flights. No positions, no times, no pilots, no flight
-data of any kind leave this script — the table is a few kilobytes and can be
-inspected line by line before anything else is run.
+Reads IGC files and writes three files: polars.csv (the table — per glider
+type, the glider's sink at airspeeds 25-65 km/h, measured from the glide
+legs of all its flights), polars_stat.csv (the statistics behind every
+value) and polars.npz (the raw per-flight histograms). No positions, no
+times, no pilots, no flight data of any kind leave this script — the text
+files can be inspected line by line, the .npz holds nothing but count
+tables per glider type.
 
-Why this table exists: run 2 (flightstates.py) cuts a flight into segments
+Why the table exists: the segmenter (flightstates.py) cuts a flight into segments
 where the AIR changes, not where the vario changes. For that it must subtract
 the glider's own sink at the momentary airspeed — and that curve differs from
 glider to glider. Estimated from a single flight it scatters by 0.21 m/s;
@@ -41,9 +43,10 @@ rising slow seconds overlaps too much between clean and spoiled corpora
 (0.31/0.38/0.44 for zeolite2/zeno2/enzo3), and it would discard the
 flights' perfectly good fast-band seconds with them.
 
-Whiskers: beside the table a sidecar polars_stat.csv is written — per kept
-cell the 90 % interval of a flight-cluster bootstrap (see bootstrap_stats).
-polars.csv itself stays byte-identical in format; nothing downstream changes.
+Whiskers: polars_stat.csv records EVERY band of EVERY glider — kept or
+discarded, with the reason — and the 90 % interval of a flight-cluster
+bootstrap (see bootstrap_stats). polars.csv itself stays byte-identical in
+format; nothing downstream changes.
 Parts dump per-flight histograms (.npz); --join merges them and builds the
 table with the full statistics and gates — identical machinery to a single
 pass. Memory stays small either way: per flight only a 4 KB histogram is
@@ -305,8 +308,9 @@ def main():
     ap.add_argument("--out", default="polars.csv")
     ap.add_argument("--part", default="1/1", help="k/n for parallel runs")
     ap.add_argument("--min", type=int, default=20,
-                    help="flights needed before a glider gets a row (use 50+ "
-                         "on a large archive)")
+                    help="pre-filter: flights needed before a glider gets a "
+                         "row. Leave it — the statistics files always cover "
+                         "every glider, whatever this is set to")
     ap.add_argument("--join", default=None,
                     help="glob of part tables to merge instead of reading IGCs")
     a = ap.parse_args()
@@ -326,8 +330,13 @@ def main():
                 g[1].extend(H)
                 g[2].extend(int(x) for x in L)
         write_table(a.out, sammel, a.min)
-        # the merged raw record, same as a single pass would ship
-        dump_schreiben(re.sub(r"\.csv$", "", a.out) + ".npz", sammel)
+        # the merged raw record, same as a single pass would ship — but
+        # never overwrite one of the input dumps (e.g. --join probe.npz)
+        dnpz = re.sub(r"\.csv$", "", a.out) + ".npz"
+        import os
+        if os.path.abspath(dnpz) not in {os.path.abspath(x)
+                                         for x in glob.glob(a.join)}:
+            dump_schreiben(dnpz, sammel)
         return
 
     files = []

@@ -61,7 +61,7 @@ bootstrap over flights. Which glider types to trust (or blacklist) can be
 decided later from this file and the `.npz` sample dumps alone, without
 touching the IGC files again.
 
-Both runs parallelise with `--part k/n`. Polar parts write `.npz`;
+Steps 2 and 3 parallelise with `--part k/n`. Polar parts write `.npz`;
 `--join "teil*.npz"` builds the table, identical to a single pass.
 Segmenter parts are plain text; `cat` them. Memory stays small: per flight
 only a 4 KB histogram is kept, never the raw seconds.
@@ -78,17 +78,15 @@ steps above are all there is to do, and **four files** come out:
 | `polars.npz` | the raw per-flight histograms behind the statistics — pure counts |
 | `states.txt` | one line per flight; with `--delta` and `xz -6` about 364 bytes per flying hour |
 
-Send all four; the recipient needs the statistics to judge — and if need be
-override — every polar decision. Nothing else should be sent: the IGC files
-stay where they are. The text files are readable by eye before they leave
+Send all four — the recipient needs the statistics to judge, and if need
+be override, every polar decision; the header of `states.txt` records the
+SHA1 of the `polars.csv` that was used, so lines and table can be checked
+to match. Nothing else should be sent: the IGC files stay where they are. The text files are readable by eye before they leave
 the house — no pilot names, and in the polar files no positions or times at
 all; `polars.npz` holds nothing but count tables per glider type. The
 glider type is the only thing carried over from the IGC header; it is what
 the sink polar is fitted per, and without it every flight falls back to the
 `_general` row.
-
-`polars.csv` belongs with the shipment: the header line of `states.txt`
-records its SHA1, so the recipient can check which table was used.
 
 ## The output line
 
@@ -161,7 +159,7 @@ Both scripts expect `polars.csv` and `flightstates.py` beside them.
 ## Size and time
 
 Measured on 774 alpine flights (2 883 h): **9.2 bytes per segment, 364 bytes
-per flying hour** (`--delta`, `xz -6`); both runs together ~30 ms per flying
+per flying hour** (`--delta`, `xz -6`); steps 2 and 3 together ~30 ms per flying
 hour per core. A world archive of ~950 000 flights: **1–2 GB compressed,
 about one core-day** — an afternoon on eight cores. Lines are independent;
 process the file line by line.
@@ -179,9 +177,10 @@ wait; cat part*.txt | xz -6 > states.txt.xz
 |---|---|
 | `flightstates.py` | the segmenter (step 3), self-contained |
 | `polarmaker.py` | sink polar per glider type, with statistics (steps 1–2) |
-| `polars.csv` | the shipped table (774 flights); replace with your own |
+| `polars.csv`, `polars_stat.csv`, `polars.npz` | example output of steps 1–2 (one archive, 1628 flights); replace with your own |
+| `example_line.txt`, `example_line_delta.txt` | one flight of that archive as a text line, both forms |
+| `example_day.png`, `example_verify.png` | the same flight through `chart.py` and `verify.py` |
 | `verify.py`, `chart.py` | check picture, day plate |
-| `example_line.txt`, `example_line_delta.txt` | one flight, both forms |
 
 Notes: barometric height when plausible, else GPS; date from `HFDTE`, times
 UTC; flights without valid B records are skipped and reported on stderr. The
