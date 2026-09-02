@@ -33,7 +33,9 @@ Line format (one flight, one line, fields separated by semicolons):
 The END of a segment is the BEGINNING of the next — which is why it is not
 written twice. Only the last point of the flight needs an entry of its own.
 
-The wind belongs to the thermal and is written only there, measured by the
+The wind belongs to the circling and is written only there. A long climb
+is cut into pieces of about 4 full turns (K_TURNS_PIECE), each with its own
+drift — the wind profile through the climb, not one mean. Measured by the
 method of thermal_strategy.py: at least 1.5 full turns, at least 30 s, four
 fixes trimmed at each end (entry and exit are not circling), drift above
 40 km/h discarded. If the conditions are not met, both wind fields stay empty;
@@ -108,6 +110,19 @@ COORD_DECIMALS  = 5       # decimals of the position (5 = about 1 m, as in kk7)
 W_MIN_TURNS = 1.5
 W_MIN_DUR  = 30     # s
 W_TRIM       = 4      # Fixes an jedem Ende abschneiden
+K_TURNS_PIECE = 4   # full turns per circling piece: a long climb is cut into
+                    # pieces of ~4 turns, each a wind sample of its own
+                    # height — the wind profile through the climb instead of
+                    # one mean. Measured on 1628 flights: the drift changes
+                    # by 2.2 km/h per 100 m of climb in the median (noise
+                    # reference, odd vs even turns: 0.3), and the kink of the
+                    # circle-centre path follows that change (r = 0.87) but
+                    # is the size of the thermal's own wobble (~45 m), so
+                    # kinks cannot be located reliably in a single climb;
+                    # fixed pieces of 4 turns keep the drift noise of one
+                    # piece (~1.4 km/h) well below the signal, and the
+                    # profile emerges from many pieces. Runs under 8 turns
+                    # stay whole.
 W_MAX_DRIFT  = 40.0   # km/h
 W_SMOOTH      = 600    # s, smoothing of the wind series between measurements
 
@@ -401,11 +416,31 @@ def own_sink(df, wx, wy, polars, glider):
     return np.interp(np.clip(eig, sp[0], sp[-1]), sp, si), src, eig
 
 
-def to_runs(df, circ, hl=None, min_s=MIN_RUN_S):
+def turn_pieces(a, b, dh):
+    """Cut a circling run [a, b] into pieces of about K_TURNS_PIECE full
+    turns each, boundaries on full turns; fewer than 2*K_TURNS_PIECE turns
+    -> one piece."""
+    kum = np.abs(dh[a:b + 1]).cumsum()
+    turns = float(kum[-1]) / 360.0
+    n = int(turns // K_TURNS_PIECE)
+    if n < 2:
+        return [(a, b)]
+    schnitt = [a]
+    for k in range(1, n):
+        j = a + int(np.searchsorted(kum, turns * k / n * 360.0))
+        schnitt.append(min(max(j, schnitt[-1] + 1), b))
+    schnitt.append(b + 1)
+    return [(schnitt[i], schnitt[i + 1] - 1) for i in range(n)]
+
+
+def to_runs(df, circ, hl=None, min_s=MIN_RUN_S, dh=None):
     """Runs of equal state.
 
-    The track is first split into circling and straight — a thermal stays
-    whole and does not fall apart at every dip in the climb.
+    The track is first split into circling and straight — a thermal does
+    not fall apart at every dip in the climb. A long climb is then cut into
+    pieces of K_TURNS_PIECE full turns (turn_pieces), each carrying its own
+    drift: the wind profile through the climb. Without dh, circling stays
+    one piece.
 
     A straight run is then divided WHERE THE AIR CHANGES: Douglas-Peucker on
     the air-corrected height hl (height minus the glider's own accumulated
@@ -424,8 +459,9 @@ def to_runs(df, circ, hl=None, min_s=MIN_RUN_S):
     t = np.arange(len(h), dtype=float)
     out = []
     for a, b, k in _merge(circ.astype(np.int8), min_s):
-        if k:                          # circling: one piece, K
-            out.append((a, b, 0))
+        if k:                          # circling: pieces of ~4 turns, K
+            for a2, b2 in (turn_pieces(a, b, dh) if dh is not None else [(a, b)]):
+                out.append((a2, b2, 0))
             continue
         if b - a < 2:
             out.append((a, b, 1))
@@ -454,7 +490,7 @@ def segments(path, polars=None):
     schritt = np.zeros(len(df))
     schritt[1:] = np.hypot(np.diff(x), np.diff(y))
     out = []
-    for a, b, k in to_runs(df, circ, hl):
+    for a, b, k in to_runs(df, circ, hl, dh=dh):
         kind = KINDS[k]
         s = dict(kind=kind, t=int(round(t0 + a)) % 86400, h=int(round(h[a])),
                  la=float(la[a]), lo=float(lo[a]), a=a, b=b)

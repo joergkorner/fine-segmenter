@@ -82,8 +82,8 @@ def main():
             (la[s["b"]] - la[s["a"]]) * 111132) / d
 
     DPI = 100
-    hr = ([4.2, 5, 1.6, .7, 1.5] if a.raw else [5, 1.6, .7, 1.5])
-    H = int(a.width * (0.205 if a.raw else 0.155))
+    hr = ([4.2, 5, 1.6, .7, 1.2, 1.2] if a.raw else [5, 1.6, .7, 1.2, 1.2])
+    H = int(a.width * (0.225 if a.raw else 0.175))
     fig, ax = plt.subplots(len(hr), 1, figsize=(a.width / DPI, H / DPI), dpi=DPI,
                            sharex=True, gridspec_kw=dict(height_ratios=hr, hspace=.16 if a.raw else .08))
     fig.patch.set_facecolor("#eef0ea")
@@ -126,15 +126,23 @@ def main():
                  extent=[std[0], std[-1], 0, 1])
     ax[2].set_yticks([]); ax[2].set_ylabel(w["zust"], rotation=0, ha="right", va="center")
     ax[3].plot(std, vk, color="#333", lw=.9, label=w["vk"])
-    ax[3].plot(std, wind, color="#1f5fa8", lw=1.8, label=w["wl"])
     ax[3].set_ylim(0, 90); ax[3].set_ylabel(w["wind"])
-    ax[3].legend(loc="upper left", fontsize=10, ncols=2, framealpha=.6)
+    ax[3].legend(loc="upper left", fontsize=10, framealpha=.6)
+    # the wind on its own scale, one dot per sample: a long climb carries
+    # several (one per piece of ~4 turns) — the profile through the climb
+    ax[4].plot(std, wind, color="#1f5fa8", lw=1.2, label=w["wl"])
+    if len(pt) >= 2:
+        ax[4].plot(np.interp(pt, np.arange(n), std), pv, "o", ms=3.6,
+                   color="#1f5fa8", mec="white", mew=.6)
+    ax[4].set_ylim(0, max(10.0, float(np.nanmax(pv)) * 1.25 if len(pv) else 10.0))
+    ax[4].set_ylabel(w["wind"])
+    ax[4].legend(loc="upper left", fontsize=10, framealpha=.6)
     ticks = np.arange(np.ceil(std[0] * 4) / 4, std[-1], .25)
     for x in ax:
         x.set_xticks(ticks)
-    ax[3].set_xticklabels([f"{int(t):02d}:{int(round((t % 1) * 60)):02d}"
+    ax[4].set_xticklabels([f"{int(t):02d}:{int(round((t % 1) * 60)):02d}"
                            if abs((t * 2) % 1) < 1e-6 else "" for t in ticks], fontsize=10)
-    ax[3].set_xlabel(w["zeit"])
+    ax[4].set_xlabel(w["zeit"])
     fig.savefig(a.out, facecolor=fig.get_facecolor())
     print(a.out, a.width, H, len(segs), "segments")
 

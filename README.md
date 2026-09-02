@@ -5,7 +5,7 @@ of segments. Two kinds, everything else is a number:
 
 | Code | Segment | carries |
 |---|---|---|
-| `K` | circling | turn count, drift = **the wind** |
+| `K` | circling | turn count, drift = **the wind**; a long climb is several pieces of ~4 turns, each with its own drift |
 | `G` | straight | `w` = **vertical movement of the air** (m/s, own sink removed), airspeed, path |
 
 The unit is the second, not the thermal. So the air that carries a pilot
@@ -76,7 +76,7 @@ steps above are all there is to do, and **four files** come out:
 | `polars.csv` | one small table — one line per glider type |
 | `polars_stat.csv` | the statistics behind it: every band of every glider, confidence interval, kept or discarded with reason |
 | `polars.npz` | the raw per-flight histograms behind the statistics — pure counts |
-| `states.txt` | one line per flight; with `--delta` and `xz -6` about 364 bytes per flying hour |
+| `states.txt` | one line per flight; with `--delta` and `xz -6` about 440 bytes per flying hour |
 
 Send all four — the recipient needs the statistics to judge, and if need
 be override, every polar decision; the header of `states.txt` records the
@@ -122,9 +122,12 @@ P;NIVIUK Artik 6;g;20230522;k27039,1920,4637603,802630,0.6,,|R45,-3,-160,42,-0.2
 ## How it decides
 
 Per second: circling if the summed heading change over a centred 20 s window
-exceeds 60° (checked against hand-marked flights: 94.7 % agreement). Wind per
-thermal from the circling drift (≥1.5 turns, ≥30 s, endpoints trimmed,
-≤40 km/h), interpolated between thermals. Straight stretches are cut on the
+exceeds 60° (checked against hand-marked flights: 94.7 % agreement). Wind
+from the circling drift (≥1.5 turns, ≥30 s, endpoints trimmed, ≤40 km/h);
+a long climb is cut into pieces of about 4 full turns, each a wind sample
+of its own height — measured on 1628 flights, the drift changes by
+2.2 km/h per 100 m of climb in the median, seven times the noise, so one
+mean per climb would throw that profile away. Straight stretches are cut on the
 **air-corrected height** (height minus accumulated own sink at the flown
 airspeed) and the ground plan — joint Douglas-Peucker, 30 m height, 60 m
 position. Boundaries are pure geometry; no label enters the cutting.
@@ -137,6 +140,7 @@ All thresholds are constants at the top of `flightstates.py`:
 | height smoothing | Savitzky-Golay 15 s | wind sample | ≥1.5 turns, ≥30 s, ≤40 km/h |
 | tolerances | 30 m height, 60 m position | wind smoothing | 600 s |
 | minimum run | 20 s | recorder gaps >60 s | longest stretch kept |
+| circling piece | ~4 full turns | | |
 | coordinates | 5 decimals (~1 m) | altitude spikes >500 m | dropped |
 
 ## Check
@@ -147,8 +151,8 @@ python3 chart.py  flight.IGC --out plate.png
 ```
 
 `verify.py` draws the flight twice — from the IGC, and from the text line
-alone — and prints the errors. Typical: height mean 13 m (90 % under 31 m),
-position mean 39 m (90 % under 88 m), every `w` and all time shares identical.
+alone — and prints the errors. Typical: height mean 9 m (90 % under 22 m),
+position mean 32 m (90 % under 68 m), every `w` and all time shares identical.
 
 `chart.py` draws one flight as a plate like the picture below. Options:
 `--raw` adds the untouched trace on top, `--language en`, `--title TEXT`.
@@ -158,9 +162,9 @@ Both scripts expect `polars.csv` and `flightstates.py` beside them.
 
 ## Size and time
 
-Measured on 774 alpine flights (2 883 h): **9.2 bytes per segment, 364 bytes
-per flying hour** (`--delta`, `xz -6`); steps 2 and 3 together ~30 ms per flying
-hour per core. A world archive of ~950 000 flights: **1–2 GB compressed,
+Measured on 1 488 alpine flights (7 720 h): **8.8 bytes per segment, 440 bytes
+per flying hour** (`--delta`, `xz -6`); steps 2 and 3 together ~35 ms per flying
+hour per core. A world archive of ~950 000 flights: **about 2 GB compressed,
 about one core-day** — an afternoon on eight cores. Lines are independent;
 process the file line by line.
 
