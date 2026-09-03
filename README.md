@@ -64,7 +64,19 @@ touching the IGC files again.
 Steps 2 and 3 parallelise with `--part k/n`. Polar parts write `.npz`;
 `--join "teil*.npz"` builds the table, identical to a single pass.
 Segmenter parts are plain text; `cat` them. Memory stays small: per flight
-only a 4 KB histogram is kept, never the raw seconds.
+only a 12 KB histogram is kept, never the raw seconds.
+
+Since 1.2 the `.npz` keeps three histograms per flight instead of one: all
+seconds (`h`, what the table is built from — unchanged), quiet seconds
+(`q`: steady vario, std over 61 s below 0.35 m/s, no circling within
+120 s, not right after a bar change — still air does not fluctuate, and
+the level of the vario is never looked at, only its steadiness) and the
+30 s after a bar change (`a`: airspeed, 15-s mean, changed by 10 km/h
+within 30 s). The table and the whisker file do not use `q` and `a`; they
+are there to check the one assumption behind the mode — that the most
+common air on a glide is near-still — where it is weakest, at the fast
+end. On the example archive they agree: Zeolite 2 GT at 60 km/h, all
+seconds −1.84, quiet −1.79, right after a bar change −1.94.
 
 ## Running it for someone else
 

@@ -47,6 +47,21 @@ Whiskers: polars_stat.csv records EVERY band of EVERY glider — kept or
 discarded, with the reason — and the 90 % interval of a flight-cluster
 bootstrap (see bootstrap_stats). polars.csv itself stays byte-identical in
 format; nothing downstream changes.
+
+Pots in the .npz (since 1.2): the mode assumes the most common air on a
+glide is near-still air. That assumption is weakest at the fast end, where
+pilots push the speed bar BECAUSE the air sinks. To make it checkable
+later, every non-circling second is sorted into one of three pots before it
+is counted, and the .npz keeps a histogram per pot and flight: h = all
+seconds (what the table is built from — unchanged), q = QUIET (steady
+vario: std over QUIET_WIN_S below QUIET_STD_MS — still air does not
+fluctuate, thermic air does; the level of the vario is never looked at,
+only its steadiness — no circling within QUIET_NOCIRC_S, not right after
+a bar change), a = ACCEL (the ACCEL_AFTER_S after the airspeed, 15-s mean,
+changed by ACCEL_KMH within ACCEL_WIN_S). Rest = h - q - a. The table and
+the whisker file are computed from h exactly as before; q and a are there
+to be looked at. Counts only, as before — no positions, no times, no
+pilots leave the script.
 Parts dump per-flight histograms (.npz); --join merges them and builds the
 table with the full statistics and gates — identical machinery to a single
 pass. Memory stays small either way: per flight only a 4 KB histogram is
@@ -86,6 +101,16 @@ BODEN_MAX = 0.05                         # stability gate: if more than this
                                          # cell. Measured gap: healthy cells
                                          # 0.00, spoiled ones 0.07-0.33
 
+QUIET_NOCIRC_S = 120                     # quiet pot: no circling within +-N s
+QUIET_STD_MS = 0.35                      # ... vario std over QUIET_WIN_S below this
+QUIET_WIN_S = 61                         # ... (odd, centred)
+ACCEL_KMH = 10.0                         # accel pot: airspeed (15-s mean) changed by >= this
+ACCEL_WIN_S = 30                         # ... over this many seconds. GPS airspeed
+                                         # jitters 3-4 km/h second to second; anything
+                                         # finer than 15-s means flags noise, not the bar
+ACCEL_AFTER_S = 30                       # ... marks the N s after the change
+POTS = ("all", "quiet", "accel")
+
 ALIAS = {"ozon": "ozone", "adv": "advance", "nivuk": "niviuk"}
 
 
@@ -96,8 +121,36 @@ def normalise(name):
     return " ".join(ALIAS.get(w, w) for w in s.split())
 
 
+def pots_of(eig, circ, vario):
+    """Pot of every second: 0 rest, 1 quiet, 2 accel (see module docstring).
+    A label per second, nothing is stored."""
+    import pandas as pd
+    n = len(eig)
+    e15 = np.convolve(eig, np.ones(15) / 15.0, "same")
+    d = np.zeros(n)
+    d[ACCEL_WIN_S:] = np.abs(e15[ACCEL_WIN_S:] - e15[:-ACCEL_WIN_S])
+    accel = np.zeros(n, bool)
+    for i in np.flatnonzero(d >= ACCEL_KMH):
+        accel[i:i + ACCEL_AFTER_S + 1] = True
+    ci = np.flatnonzero(circ)
+    idx = np.arange(n)
+    if len(ci):
+        pos = np.searchsorted(ci, idx)
+        prev = np.where(pos > 0, ci[np.clip(pos - 1, 0, len(ci) - 1)], -10 ** 9)
+        nxt = np.where(pos < len(ci), ci[np.clip(pos, 0, len(ci) - 1)], 10 ** 9)
+        abstand = np.minimum(idx - prev, nxt - idx)
+    else:
+        abstand = np.full(n, 10 ** 9)
+    std = pd.Series(vario).rolling(QUIET_WIN_S, center=True, min_periods=QUIET_WIN_S // 2).std().to_numpy()
+    quiet = (abstand > QUIET_NOCIRC_S) & (std < QUIET_STD_MS) & ~accel
+    pot = np.zeros(n, np.int8)
+    pot[accel] = 2
+    pot[quiet] = 1
+    return pot
+
+
 def seconds_of(path):
-    """(glider, airspeeds, varios) — one pair per non-circling second."""
+    """(glider, airspeeds, varios, pots) — one triple per non-circling second."""
     day, glider, t0, raw = fs.read_igc(path)
     df = fs.resample_1hz(raw)
     dh, net = fs.turn_signal(df)
@@ -109,8 +162,9 @@ def seconds_of(path):
     vx[1:] = np.diff(x); vy[1:] = np.diff(y)
     eig = np.hypot(vx - wx, vy - wy) * 3.6
     v = df["vario"].to_numpy()
+    pot = pots_of(eig, circ, v)
     m = (~circ) & (eig > 18) & (eig < 75) & (v > -6) & (v < 4)
-    return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32)
+    return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32), pot[m]
 
 
 KANTEN = np.arange(-6, 4.001, 0.05)      # the one histogram grid everything uses
@@ -122,16 +176,21 @@ def mode_of(v, width=0.05):
     return mode_from_hist(h, KANTEN, width)
 
 
-def hist_of(e, v):
-    """One flight -> (band x bin) uint16 histogram. All later maths — mode,
-    bootstrap, gates — needs only this; the raw seconds are never kept, so
-    memory stays a few KB per flight even on a 100k-flight archive. uint16
-    is safe: no flight has 65535 seconds in one band and bin."""
-    H = np.zeros((len(SPEEDS), len(KANTEN) - 1), np.uint16)
+def hist_of(e, v, pot=None):
+    """One flight -> (pot x band x bin) uint16 histograms: [0] all seconds,
+    [1] quiet, [2] accel. All later maths — mode, bootstrap, gates — needs
+    only [0]; the raw seconds are never kept, so memory stays a few KB per
+    flight even on a 100k-flight archive. uint16 is safe: no flight has
+    65535 seconds in one band and bin."""
+    H = np.zeros((len(POTS), len(SPEEDS), len(KANTEN) - 1), np.uint16)
+    if pot is None:
+        pot = np.zeros(len(e), np.int8)
     for i, c in enumerate(SPEEDS):
         m = (e >= c - 2.5) & (e < c + 2.5)
         if m.any():
-            H[i] = np.histogram(v[m], bins=KANTEN)[0]
+            H[0, i] = np.histogram(v[m], bins=KANTEN)[0]
+            H[1, i] = np.histogram(v[m & (pot == 1)], bins=KANTEN)[0]
+            H[2, i] = np.histogram(v[m & (pot == 2)], bins=KANTEN)[0]
     return H
 
 
@@ -204,10 +263,13 @@ def bootstrap_stats(HL, rng):
 def dump_schreiben(dest, sammel):
     """Per-flight histograms of every glider -> one compressed .npz.
     Counts only: no positions, no times, no pilots."""
-    arrs = {"namen": np.array(json.dumps(list(sammel)))}
+    arrs = {"namen": np.array(json.dumps(list(sammel))), "toepfe": np.array(json.dumps(POTS))}
     for i, k2 in enumerate(sammel):
         nf, HL, LE = sammel[k2]
-        arrs[f"h{i}"] = np.stack(HL)
+        H = np.stack(HL)                                 # (flights x pots x bands x bins)
+        arrs[f"h{i}"] = H[:, 0]                          # all seconds — same as before
+        arrs[f"q{i}"] = H[:, 1]                          # quiet pot
+        arrs[f"a{i}"] = H[:, 2]                          # accel pot
         arrs[f"l{i}"] = np.array(LE, np.int64)
     np.savez_compressed(dest, **arrs)
     print(f"{dest}: raw per-flight histograms, {Path(dest).stat().st_size} bytes")
@@ -216,9 +278,10 @@ def dump_schreiben(dest, sammel):
 def write_table(dest, sammel, min_flights):
     rows = []
     stat = []                        # whisker sidecar, one line per kept cell
-    for name, (nf, HL, LE) in sammel.items():
-        if not name or nf < min_flights or not HL:
+    for name, (nf, HL3, LE) in sammel.items():
+        if not name or nf < min_flights or not HL3:
             continue
+        HL = [np.asarray(h)[0] for h in HL3]            # all seconds — the table as before
         Hs = np.zeros((len(SPEEDS), len(KANTEN) - 1), np.int64)
         for h in HL:
             Hs += h
@@ -325,9 +388,11 @@ def main():
             keys = json.loads(str(z["namen"]))
             for i, k in enumerate(keys):
                 H = z[f"h{i}"]; L = z[f"l{i}"]
+                Q = z[f"q{i}"] if f"q{i}" in z else np.zeros_like(H)   # dumps of 1.1: no pots
+                A = z[f"a{i}"] if f"a{i}" in z else np.zeros_like(H)
                 g = sammel.setdefault(k, [0, [], []])
                 g[0] += H.shape[0]
-                g[1].extend(H)
+                g[1].extend(np.stack([H[j], Q[j], A[j]]) for j in range(H.shape[0]))
                 g[2].extend(int(x) for x in L)
         write_table(a.out, sammel, a.min)
         # the merged raw record, same as a single pass would ship — but
@@ -359,11 +424,11 @@ def main():
     sammel = {}                # name -> [flights, [flight histograms], [seconds]]
     for i, p in enumerate(files, 1):
         try:
-            name, e, v = seconds_of(p)
+            name, e, v, pot = seconds_of(p)
         except Exception as err:
             print(f"# {Path(p).name}: {type(err).__name__}: {err}", file=sys.stderr)
             continue
-        H = hist_of(e, v)
+        H = hist_of(e, v, pot)
         for nm in (name, "_general"):
             g = sammel.setdefault(nm, [0, [], []])
             g[0] += 1
