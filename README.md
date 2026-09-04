@@ -1,5 +1,7 @@
 # flightstates — flight track in, one line of text out
 
+*Current: flightstates 2.1, polarmaker 1.3 (September 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line.*
+
 Reads IGC tracks. Writes one text line per flight: the flight as a sequence
 of segments. Two kinds, everything else is a number:
 
