@@ -6,7 +6,7 @@ of segments. Two kinds, everything else is a number:
 | Code | Segment | carries |
 |---|---|---|
 | `K` | circling | turn count, drift = **the wind**; a long climb is several pieces of ~4 turns, each with its own drift |
-| `G` | straight | `w` = **vertical movement of the air** (m/s, own sink removed), airspeed, path |
+| `G` | straight | `w` = **vertical movement of the air** (m/s, own sink removed), airspeed, path, and the wind that was subtracted |
 
 The unit is the second, not the thermal. So the air that carries a pilot
 *without* circling — the air that decides a cross-country flight — is in the
@@ -78,6 +78,17 @@ common air on a glide is near-still — where it is weakest, at the fast
 end. On the example archive they agree: Zeolite 2 GT at 60 km/h, all
 seconds −1.84, quiet −1.79, right after a bar change −1.94.
 
+Since 1.3 every flight in the `.npz` also carries a **key** (`k`): day,
+start second UTC, start latitude and longitude in 1e-5 degrees — the same
+four numbers that open the flight's line in `states.txt` (day; `t`, `lat`,
+`lon` of its first segment). Histogram and segments of a flight can thus
+be joined, and everything about the flight as a whole — glide heights,
+climb rates, region, month — comes from the segments later; only what has
+to be counted per second lives in the histograms. This is the basis for
+computing polars **per situation** (region, height, strength of the day)
+instead of one universal polar per glider type, once the archive is large
+enough for that.
+
 ## Running it for someone else
 
 If you hold an archive and someone asks you to compress it for them, the
@@ -94,19 +105,33 @@ Send all four — the recipient needs the statistics to judge, and if need
 be override, every polar decision; the header of `states.txt` records the
 SHA1 of the `polars.csv` that was used, so lines and table can be checked
 to match. Nothing else should be sent: the IGC files stay where they are. The text files are readable by eye before they leave
-the house — no pilot names, and in the polar files no positions or times at
-all; `polars.npz` holds nothing but count tables per glider type. The
-glider type is the only thing carried over from the IGC header; it is what
-the sink polar is fitted per, and without it every flight falls back to the
-`_general` row.
+the house — no pilot names anywhere; `polars.npz` holds count tables per
+glider type and, per flight, the key (day, start time, start point) that
+`states.txt` shows anyway. The glider type is the only thing carried over
+from the IGC header; it is what the sink polar is fitted per, and without
+it every flight falls back to the `_general` row.
+
+**Corrected, but invertible.** `w` and `v` in `states.txt` are corrected
+numbers: the own sink from `polars.csv` and the wind from the circling
+drift are already removed — the segmenter needs both to cut the straight
+stretches where the *air* changes, and a line that says "here the air rose
+1.2 m/s" can be put on a map by anyone. But nothing is lost: each straight
+segment also carries its raw height difference and duration (the raw vario),
+chord and path (the ground speed) and, since 2.1, the wind that was
+subtracted. From these, `w` and `v` can be recomputed with any better polar
+or wind — per region, per height, from all flights of a day — without the
+tracks. Checked on the example archive: `v` rebuilt from chord, path and
+wind agrees with the written `v` to ±0.4 km/h, `w` to ±0.03 m/s (the
+rounding). The correction in the file is the current best; the raw numbers
+are what a later, finer one starts from.
 
 ## The output line
 
 ```
-# flightstates 2.0 polars=polars.csv sha1=a48b1d37a814      <- file header, once
+# flightstates 2.1 polars=polars.csv sha1=2df03cffd1ef      <- file header, once
 id;glider;pol;yyyymmdd;SEG|SEG|...;END
 
-G (straight):   G,t,h,lat,lon,w,v,z
+G (straight):   G,t,h,lat,lon,w,v,z,wind_kmh,wind_from_deg
 K (circling):   K,t,h,lat,lon,turns,drift_kmh,drift_from_deg
 END:              t,h,lat,lon
 ```
@@ -115,6 +140,10 @@ END:              t,h,lat,lon
 segment's **beginning**; the end of one segment is the beginning of the next.
 `w` = vertical air movement in m/s, own sink removed. `v` = true airspeed
 km/h (mean over the seconds). `z` = flown path over chord, in percent.
+`wind_kmh, wind_from_deg` (since 2.1) = the wind that was subtracted to get
+`v`, mean over the segment, speed and the direction it comes from — same
+convention as the drift of a `K` segment. Lines of 2.0 (without the two
+wind fields) are still read by `read_line()` / `read_line_delta()`.
 With `v` and the height difference, a sink polar can be re-derived from the
 lines alone. `pol` records where the own-sink curve came from: `g` glider's
 row, `a` `_general`, `n` none (constant −1.11).
@@ -128,7 +157,7 @@ short numbers; `read_line()` / `read_line_delta()` in `flightstates.py` turn
 a line back into segments.
 
 ```
-P;NIVIUK Artik 6;g;20230522;k27039,1920,4637603,802630,0.6,,|R45,-3,-160,42,-0.2|…
+P;NIVIUK Artik 6;g;20230522;K27039,1920,4637603,802630,0.6,,|G45,-3,-160,42,0.2,35,3,4.1,110|…
 ```
 
 ## How it decides

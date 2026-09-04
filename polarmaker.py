@@ -62,9 +62,17 @@ changed by ACCEL_KMH within ACCEL_WIN_S). Rest = h - q - a. The table and
 the whisker file are computed from h exactly as before; q and a are there
 to be looked at. Counts only, as before — no positions, no times, no
 pilots leave the script.
+
+Keys in the .npz (since 1.3): k{i} holds, per flight of glider i, four
+integers — day (yyyymmdd), start second of the day UTC, start latitude and
+longitude in 1e-5 degrees. They are exactly the day and the t, lat, lon of
+the first segment of the flight's line in states.txt, so the histogram of a
+flight and its segments can be joined. From the segments every property of
+the flight as a whole follows later (glide heights, climb rates, region,
+month); only what has to be counted per second lives in the histograms.
 Parts dump per-flight histograms (.npz); --join merges them and builds the
 table with the full statistics and gates — identical machinery to a single
-pass. Memory stays small either way: per flight only a 4 KB histogram is
+pass. Memory stays small either way: per flight only a 12 KB histogram is
 kept, never the raw seconds.
 
     python3 polarmaker.py "flights/**/*.IGC" --out polars.csv
@@ -150,9 +158,15 @@ def pots_of(eig, circ, vario):
 
 
 def seconds_of(path):
-    """(glider, airspeeds, varios, pots) — one triple per non-circling second."""
+    """(glider, airspeeds, varios, pots, key) — one triple per non-circling
+    second, plus the flight's key (day, start second UTC, start lat, start
+    lon in 1e-5 deg): the same four numbers that open the flight's line in
+    states.txt (day; t, lat, lon of its first segment)."""
     day, glider, t0, raw = fs.read_igc(path)
     df = fs.resample_1hz(raw)
+    key = (int(day), int(round(t0 + float(df["t"].iloc[0]))) % 86400,
+           int(round(float(df["lat"].iloc[0]) * 10**fs.COORD_DECIMALS)),
+           int(round(float(df["lon"].iloc[0]) * 10**fs.COORD_DECIMALS)))
     dh, net = fs.turn_signal(df)
     wx, wy, wk = fs.wind_series(df, dh, net)
     circ = fs.circling_per_second(df, net, wk)
@@ -164,7 +178,7 @@ def seconds_of(path):
     v = df["vario"].to_numpy()
     pot = pots_of(eig, circ, v)
     m = (~circ) & (eig > 18) & (eig < 75) & (v > -6) & (v < 4)
-    return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32), pot[m]
+    return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32), pot[m], key
 
 
 KANTEN = np.arange(-6, 4.001, 0.05)      # the one histogram grid everything uses
@@ -261,16 +275,18 @@ def bootstrap_stats(HL, rng):
 
 
 def dump_schreiben(dest, sammel):
-    """Per-flight histograms of every glider -> one compressed .npz.
-    Counts only: no positions, no times, no pilots."""
+    """Per-flight histograms of every glider -> one compressed .npz, plus
+    the key of every flight (k: day, start second, start lat/lon) so the
+    flight can be found in states.txt. No pilots."""
     arrs = {"namen": np.array(json.dumps(list(sammel))), "toepfe": np.array(json.dumps(POTS))}
     for i, k2 in enumerate(sammel):
-        nf, HL, LE = sammel[k2]
+        nf, HL, LE, KE = sammel[k2]
         H = np.stack(HL)                                 # (flights x pots x bands x bins)
         arrs[f"h{i}"] = H[:, 0]                          # all seconds — same as before
         arrs[f"q{i}"] = H[:, 1]                          # quiet pot
         arrs[f"a{i}"] = H[:, 2]                          # accel pot
         arrs[f"l{i}"] = np.array(LE, np.int64)
+        arrs[f"k{i}"] = np.array(KE, np.int64).reshape(-1, 4)   # key per flight
     np.savez_compressed(dest, **arrs)
     print(f"{dest}: raw per-flight histograms, {Path(dest).stat().st_size} bytes")
 
@@ -278,7 +294,7 @@ def dump_schreiben(dest, sammel):
 def write_table(dest, sammel, min_flights):
     rows = []
     stat = []                        # whisker sidecar, one line per kept cell
-    for name, (nf, HL3, LE) in sammel.items():
+    for name, (nf, HL3, LE, _ke) in sammel.items():
         if not name or nf < min_flights or not HL3:
             continue
         HL = [np.asarray(h)[0] for h in HL3]            # all seconds — the table as before
@@ -390,10 +406,12 @@ def main():
                 H = z[f"h{i}"]; L = z[f"l{i}"]
                 Q = z[f"q{i}"] if f"q{i}" in z else np.zeros_like(H)   # dumps of 1.1: no pots
                 A = z[f"a{i}"] if f"a{i}" in z else np.zeros_like(H)
-                g = sammel.setdefault(k, [0, [], []])
+                KE = z[f"k{i}"] if f"k{i}" in z else np.zeros((H.shape[0], 4), np.int64)  # dumps before 1.3: no keys
+                g = sammel.setdefault(k, [0, [], [], []])
                 g[0] += H.shape[0]
                 g[1].extend(np.stack([H[j], Q[j], A[j]]) for j in range(H.shape[0]))
                 g[2].extend(int(x) for x in L)
+                g[3].extend(tuple(int(x) for x in KE[j]) for j in range(H.shape[0]))
         write_table(a.out, sammel, a.min)
         # the merged raw record, same as a single pass would ship — but
         # never overwrite one of the input dumps (e.g. --join probe.npz)
@@ -421,19 +439,20 @@ def main():
     k, n = (int(x) for x in a.part.split("/"))
     files = files[k - 1::n]
 
-    sammel = {}                # name -> [flights, [flight histograms], [seconds]]
+    sammel = {}                # name -> [flights, [flight histograms], [seconds], [keys]]
     for i, p in enumerate(files, 1):
         try:
-            name, e, v, pot = seconds_of(p)
+            name, e, v, pot, key = seconds_of(p)
         except Exception as err:
             print(f"# {Path(p).name}: {type(err).__name__}: {err}", file=sys.stderr)
             continue
         H = hist_of(e, v, pot)
         for nm in (name, "_general"):
-            g = sammel.setdefault(nm, [0, [], []])
+            g = sammel.setdefault(nm, [0, [], [], []])
             g[0] += 1
             g[1].append(H)             # same object twice — no copy
             g[2].append(int(len(e)))
+            g[3].append(key)
         if i % 100 == 0:
             print(f"  {i}/{len(files)}", file=sys.stderr)
     if n > 1:

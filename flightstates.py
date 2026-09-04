@@ -21,14 +21,24 @@ Line format (one flight, one line, fields separated by semicolons):
 
     id;glider;yyyymmdd;SEG|SEG|...;END
 
-  SEG straight (G,T,L):   A,t,h,lat,lon
-  SEG circling (K,k):     A,t,h,lat,lon,turns,drift_kmh,drift_from_deg
+  SEG straight (G):       A,t,h,lat,lon,w,v,z,wind_kmh,wind_from_deg
+  SEG circling (K):       A,t,h,lat,lon,turns,drift_kmh,drift_from_deg
   END:                      t,h,lat,lon
 
   A       kind (one letter)
   t       second of the day UTC at which the segment BEGINS
   h       altitude MSL in m at the beginning
   lat,lon position at the beginning, five decimals (about 1 m, as in kk7)
+
+  w       straight: movement of the air over the piece, m/s — the glider's
+          own sink at the flown airspeed already removed
+  v       straight: true airspeed, km/h, mean of the seconds
+  z       straight: how much longer the flown path was than the chord, in %
+  wind    straight (since 2.1): the wind that was SUBTRACTED to get v —
+          speed in km/h and the direction it comes from, mean over the piece.
+          With it the line is invertible: raw vario is (h_next - h)/(t_next - t),
+          ground speed follows from chord, z and duration, and w and v can be
+          recomputed from those with any other polar or wind, without the track.
 
 The END of a segment is the BEGINNING of the next — which is why it is not
 written twice. Only the last point of the flight needs an entry of its own.
@@ -517,6 +527,12 @@ def segments(path, polars=None):
             s["z"] = int(min(round(100 * (weg / sehne - 1)), 999)) \
                 if sehne > 1 else 0
             s["z"] = max(s["z"], 0)
+            # the wind subtracted on this piece (mean vector of its seconds),
+            # written so the correction can be undone later
+            mx = float(wx[a + 1:b + 1].mean()) if b > a else float(wx[a])
+            my = float(wy[a + 1:b + 1].mean()) if b > a else float(wy[a])
+            s["wk"] = round(float(np.hypot(mx, my)) * 3.6, 1)
+            s["wd"] = int(round((np.degrees(np.arctan2(-mx, -my)) + 360) % 360)) % 360
         out.append(s)
     end = (int(round(t0 + len(df) - 1)) % 86400, int(round(h[-1])),
             float(la[-1]), float(lo[-1]))
@@ -535,7 +551,7 @@ def line(kennung, glider, pol, day, segs, end):
             r = "" if s["dir"] is None else str(s["dir"])
             b += f",{s['turns']:.1f},{d},{r}"
         else:
-            b += f",{s['w']:.1f},{s['v']},{s['z']}"
+            b += f",{s['w']:.1f},{s['v']},{s['z']},{s['wk']:.1f},{s['wd']}"
         st.append(b)
     return (f"{kennung};{glider};{pol};{day};" + "|".join(st)
             + f";{end[0]},{end[1]},"
@@ -560,7 +576,7 @@ def line_delta(kennung, glider, pol, day, segs, end):
             r = "" if s_["dir"] is None else str(s_["dir"])
             b += f",{s_['turns']:.1f},{d},{r}"
         else:
-            b += f",{s_['w']:.1f},{s_['v']},{s_['z']}"
+            b += f",{s_['w']:.1f},{s_['v']},{s_['z']},{s_['wk']:.1f},{s_['wd']}"
         st.append(b); v = (s_["t"], s_["h"], la, lo)
     e = (end[0] - v[0], end[1] - v[1],
          round(end[2] * 10**COORD_DECIMALS) - v[2], round(end[3] * 10**COORD_DECIMALS) - v[3])
@@ -584,6 +600,8 @@ def read_line_delta(zl):
             s_["dir"] = int(f[6]) if f[6] else None
         else:
             s_["w"] = float(f[4]); s_["v"] = int(f[5]); s_["z"] = int(f[6])
+            if len(f) > 8:                       # 2.1: the subtracted wind
+                s_["wk"] = float(f[7]); s_["wd"] = int(f[8])
         segs.append(s_)
     f = [int(z) for z in er.split(",")]
     end = (v[0] + f[0], v[1] + f[1], (v[2] + f[2]) / 10**COORD_DECIMALS, (v[3] + f[3]) / 10**COORD_DECIMALS)
@@ -603,6 +621,8 @@ def read_line(zl):
             s["dir"] = int(f[7]) if f[7] else None
         else:
             s["w"] = float(f[5]); s["v"] = int(f[6]); s["z"] = int(f[7])
+            if len(f) > 9:                       # 2.1: the subtracted wind
+                s["wk"] = float(f[8]); s["wd"] = int(f[9])
         segs.append(s)
     f = er.split(",")
     return kennung, glider, pol, int(day), segs, (int(f[0]), int(f[1]), float(f[2]), float(f[3]))
@@ -630,9 +650,9 @@ if __name__ == "__main__":
     polars = load_polars(poldat) if poldat else None
     if poldat:
         pruef = hashlib.sha1(open(poldat, "rb").read()).hexdigest()[:12]
-        print(f"# flightstates 2.0 polars={Path(poldat).name} sha1={pruef}")
+        print(f"# flightstates 2.1 polars={Path(poldat).name} sha1={pruef}")
     else:
-        print("# flightstates 2.0 polars=none (constant own sink "
+        print("# flightstates 2.1 polars=none (constant own sink "
               f"{CALM_SINK} m/s)")
     dateien = []
     for a in argv:
