@@ -34,7 +34,8 @@ Line format (one flight, one line, fields separated by semicolons):
           own sink at the flown airspeed already removed
   v       straight: true airspeed, km/h, mean of the seconds
   z       straight: how much longer the flown path was than the chord, in %
-  wind    straight (since 2.1): the wind that was SUBTRACTED to get v —
+  wind    straight (since 2.1; 2.2 adds the guards against corrupt files,
+          same line format): the wind that was SUBTRACTED to get v —
           speed in km/h and the direction it comes from, mean over the piece.
           With it the line is invertible: raw vario is (h_next - h)/(t_next - t),
           ground speed follows from chord, z and duration, and w and v can be
@@ -145,6 +146,9 @@ def read_igc(path):
     record of the IGC header; it names no person and is what a sink polar has
     to be fitted per — the per-flight scatter of that quantity is 0.35 m/s,
     far too noisy, while per glider type it settles to about 0.03 m/s."""
+    groesse = Path(path).stat().st_size
+    if groesse > MAX_FILE_BYTES:
+        raise ValueError(f"Datei zu gross ({groesse//1_000_000} MB, Grenze {MAX_FILE_BYTES//1_000_000})")
     t, la, lo, ab, ag = [], [], [], [], []
     day = 0; glider = ""
     with open(path, "r", encoding="latin-1", errors="ignore") as f:
@@ -173,7 +177,10 @@ def read_igc(path):
         m = re.search(r"(20\d\d)[-_.]?(\d\d)[-_.]?(\d\d)", Path(path).name)
         day = int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(m.group(3)) if m else 0
     t = np.array(t, float)
-    jump = np.concatenate(([0], np.cumsum(np.diff(t) < 0) * 86400.0))  # midnight rollover
+    rueck = np.diff(t) < 0
+    if rueck.sum() > MAX_ROLLOVERS:
+        raise ValueError(f"Zeitstempel laufen {int(rueck.sum())} Mal rueckwaerts — kaputte Datei")
+    jump = np.concatenate(([0], np.cumsum(rueck) * 86400.0))  # midnight rollover
     t += jump
     ab = np.array(ab, float); ag = np.array(ag, float)
     alt = ab if ab.std() > 1 else ag
@@ -183,6 +190,14 @@ def read_igc(path):
 
 MAX_GAP_S = 60        # recorder gaps longer than this are not interpolated;
                       # the longest contiguous stretch of the flight is kept
+# Guards against corrupt files — a broken recorder can write hours of garbage
+# time stamps, and resampling that to 1 Hz would allocate millions of seconds
+# and eat the memory of the whole run (seen on a large archive). A file that
+# trips one of these is refused with a message on stderr, like a file with too
+# few fixes; nothing else changes for files that pass.
+MAX_FILE_BYTES = 30_000_000   # an IGC of a real flight is 0.1–5 MB
+MAX_ROLLOVERS  = 3            # time going backwards = midnight; more than this is garbage
+MAX_FLIGHT_S   = 24*3600      # longest contiguous stretch after the gap cut
 
 
 def resample_1hz(df):
@@ -204,6 +219,9 @@ def resample_1hz(df):
         gr = np.concatenate(([0], gap + 1, [len(t)]))
         i = int(np.argmax(np.diff(gr)))
         df = df.iloc[gr[i]:gr[i + 1]]
+    dauer = float(df["t"].iloc[-1] - df["t"].iloc[0])
+    if dauer > MAX_FLIGHT_S:
+        raise ValueError(f"Flug {dauer/3600:.0f} h lang — kaputte Zeitstempel")
     # t keeps its offset from the first RAW fix, so UTC times stay right
     idx = np.arange(int(df["t"].iloc[0]), int(df["t"].iloc[-1]) + 1)
     out = pd.DataFrame(dict(t=idx.astype(float)))
@@ -650,9 +668,9 @@ if __name__ == "__main__":
     polars = load_polars(poldat) if poldat else None
     if poldat:
         pruef = hashlib.sha1(open(poldat, "rb").read()).hexdigest()[:12]
-        print(f"# flightstates 2.1 polars={Path(poldat).name} sha1={pruef}")
+        print(f"# flightstates 2.2 polars={Path(poldat).name} sha1={pruef}")
     else:
-        print("# flightstates 2.1 polars=none (constant own sink "
+        print("# flightstates 2.2 polars=none (constant own sink "
               f"{CALM_SINK} m/s)")
     dateien = []
     for a in argv:

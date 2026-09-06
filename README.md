@@ -1,6 +1,6 @@
 # flightstates — flight track in, one line of text out
 
-*Current: flightstates 2.1, polarmaker 1.3 (September 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line.*
+*Current: flightstates 2.2, polarmaker 1.3 (September 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line; corrupt files are refused instead of eating memory.*
 
 Reads IGC tracks. Writes one text line per flight: the flight as a sequence
 of segments. Two kinds, everything else is a number:
@@ -130,7 +130,7 @@ are what a later, finer one starts from.
 ## The output line
 
 ```
-# flightstates 2.1 polars=polars.csv sha1=2df03cffd1ef      <- file header, once
+# flightstates 2.2 polars=polars.csv sha1=2df03cffd1ef      <- file header, once
 id;glider;pol;yyyymmdd;SEG|SEG|...;END
 
 G (straight):   G,t,h,lat,lon,w,v,z,wind_kmh,wind_from_deg
@@ -142,7 +142,7 @@ END:              t,h,lat,lon
 segment's **beginning**; the end of one segment is the beginning of the next.
 `w` = vertical air movement in m/s, own sink removed. `v` = true airspeed
 km/h (mean over the seconds). `z` = flown path over chord, in percent.
-`wind_kmh, wind_from_deg` (since 2.1) = the wind that was subtracted to get
+`wind_kmh, wind_from_deg` (since 2.1; 2.2 = same lines, plus the guards against corrupt files) = the wind that was subtracted to get
 `v`, mean over the segment, speed and the direction it comes from — same
 convention as the drift of a `K` segment. Lines of 2.0 (without the two
 wind fields) are still read by `read_line()` / `read_line_delta()`.
@@ -185,6 +185,7 @@ All thresholds are constants at the top of `flightstates.py`:
 | minimum run | 20 s | recorder gaps >60 s | longest stretch kept |
 | circling piece | ~4 full turns | | |
 | coordinates | 5 decimals (~1 m) | altitude spikes >500 m | dropped |
+| refused files | >30 MB, time running backwards >3×, longest stretch >24 h | | |
 
 ## Check
 
@@ -192,6 +193,16 @@ All thresholds are constants at the top of `flightstates.py`:
 python3 verify.py flight.IGC --out check.png
 python3 chart.py  flight.IGC --out plate.png
 ```
+
+**Corrupt files** are refused, not processed: an IGC over 30 MB, one whose
+time stamps run backwards more than three times (one or two is a midnight
+crossing, more is garbage), or one whose longest contiguous stretch is
+longer than 24 hours. Each refusal is one line on stderr with the file
+name and the reason, like a file with too few fixes. Without these guards a
+recorder that wrote hours of garbage time stamps made the 1-Hz resampling
+allocate millions of seconds and eat the memory of the whole run (seen on
+a large archive; 2 GB for a single 7 MB file). Files that pass are
+processed exactly as before.
 
 `verify.py` draws the flight twice — from the IGC, and from the text line
 alone — and prints the errors. Typical: height mean 9 m (90 % under 22 m),
