@@ -63,6 +63,14 @@ the whisker file are computed from h exactly as before; q and a are there
 to be looked at. Counts only, as before — no positions, no times, no
 pilots leave the script.
 
+--hoehe H (since 1.4) rescales every second to the reference altitude H
+before it is counted: airspeed and vario multiplied by sqrt(rho(h)/rho(H)),
+ISA density from the recorder's pressure altitude. At constant angle of
+attack that is exactly how a glider's speed and sink change with density,
+so the table then reads as if every flight had been flown at H. Without
+the option nothing changes. The table header and the .npz ("hoehe") say
+which it is.
+
 Keys in the .npz (since 1.3): k{i} holds, per flight of glider i, four
 integers — day (yyyymmdd), start second of the day UTC, start latitude and
 longitude in 1e-5 degrees. They are exactly the day and the t, lat, lon of
@@ -177,11 +185,28 @@ def seconds_of(path):
     eig = np.hypot(vx - wx, vy - wy) * 3.6
     v = df["vario"].to_numpy()
     pot = pots_of(eig, circ, v)
+    if HOEHE_REF is not None:
+        f = dichte_faktor(df["alt"].to_numpy(), HOEHE_REF)
+        eig = eig * f; v = v * f
     m = (~circ) & (eig > 18) & (eig < 75) & (v > -6) & (v < 4)
     return normalise(glider), eig[m].astype(np.float32), v[m].astype(np.float32), pot[m], key
 
 
 KANTEN = np.arange(-6, 4.001, 0.05)      # the one histogram grid everything uses
+
+HOEHE_REF = None                          # --hoehe H: rescale every second to this altitude (m)
+
+
+def dichte_faktor(alt, ref):
+    """sqrt(rho(alt) / rho(ref)) in the ISA — at constant angle of attack the
+    same glider flies faster AND sinks faster in thinner air by exactly this
+    factor, so airspeed and vario of a second at `alt` become their values
+    at `ref` when multiplied by it. Pressure altitude from the recorder is
+    what the ISA wants; the real temperature deviates by up to ~15 K, which
+    is ~2 % in the factor — far below the per-flight scatter."""
+    alt = np.clip(np.asarray(alt, float), -500.0, 11000.0)
+    sig = lambda h: (1.0 - 2.25577e-5 * h) ** 4.2559
+    return np.sqrt(sig(alt) / sig(float(ref)))
 
 
 def mode_of(v, width=0.05):
@@ -278,7 +303,8 @@ def dump_schreiben(dest, sammel):
     """Per-flight histograms of every glider -> one compressed .npz, plus
     the key of every flight (k: day, start second, start lat/lon) so the
     flight can be found in states.txt. No pilots."""
-    arrs = {"namen": np.array(json.dumps(list(sammel))), "toepfe": np.array(json.dumps(POTS))}
+    arrs = {"namen": np.array(json.dumps(list(sammel))), "toepfe": np.array(json.dumps(POTS)),
+            "hoehe": np.array(-1.0 if HOEHE_REF is None else float(HOEHE_REF))}
     for i, k2 in enumerate(sammel):
         nf, HL, LE, KE = sammel[k2]
         H = np.stack(HL)                                 # (flights x pots x bands x bins)
@@ -360,6 +386,8 @@ def write_table(dest, sammel, min_flights):
     rows.sort(key=lambda r: -r[1])
     with open(dest, "w", encoding="utf-8") as f:
         f.write("# flightstates polar table 1.1\n")
+        if HOEHE_REF is not None:
+            f.write(f"# rescaled to {HOEHE_REF:.0f} m (ISA density)\n")
         f.write("# own sink [m/s] of the glider in near-still air (mode per "
                 "airspeed band [km/h])\n")
         f.write("glider;flights;seconds;" + ";".join(str(c) for c in SPEEDS) + "\n")
@@ -392,7 +420,12 @@ def main():
                          "every glider, whatever this is set to")
     ap.add_argument("--join", default=None,
                     help="glob of part tables to merge instead of reading IGCs")
+    ap.add_argument("--hoehe", type=float, default=None,
+                    help="reference altitude in m: every second is rescaled to "
+                         "this altitude (ISA density) before it is counted")
     a = ap.parse_args()
+    global HOEHE_REF
+    HOEHE_REF = a.hoehe
 
     if a.join:
         # merge part dumps (.npz with per-flight histograms) and build the
@@ -401,6 +434,8 @@ def main():
         sammel = {}
         for part in sorted(glob.glob(a.join)):
             z = np.load(part)
+            if "hoehe" in z and float(z["hoehe"]) >= 0:      # parts made with --hoehe carry it
+                HOEHE_REF = float(z["hoehe"])
             keys = json.loads(str(z["namen"]))
             for i, k in enumerate(keys):
                 H = z[f"h{i}"]; L = z[f"l{i}"]
