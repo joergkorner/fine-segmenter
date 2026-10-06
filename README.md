@@ -1,6 +1,6 @@
 # flightstates — flight track in, one line of text out
 
-*Current: flightstates 2.2, polarmaker 1.3 (September 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line; corrupt files are refused instead of eating memory.*
+*Current: flightstates 2.2, polarmaker 1.4 (October 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line; corrupt files are refused instead of eating memory; polarmaker can rescale every second to a reference altitude (`--hoehe`). These are the versions used for the Valais polars and flow field.*
 
 Reads IGC tracks. Writes one text line per flight: the flight as a sequence
 of segments. Two kinds, everything else is a number:
@@ -90,6 +90,14 @@ to be counted per second lives in the histograms. This is the basis for
 computing polars **per situation** (region, height, strength of the day)
 instead of one universal polar per glider type, once the archive is large
 enough for that.
+
+Since 1.4 `--hoehe H` rescales every second to the reference altitude H
+before it is counted: airspeed and vario are both multiplied by
+sqrt(rho(h)/rho(H)), with the ISA density at the recorder's pressure
+altitude. At a constant angle of attack this is exactly how a glider's
+speed and sink change with density, so the table then reads as if every
+flight had been flown at H. Without the option nothing changes; the table
+header and the `.npz` (`hoehe`) say which it is.
 
 ## Running it for someone else
 
