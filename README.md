@@ -1,6 +1,6 @@
 # flightstates — flight track in, one line of text out
 
-*Current: flightstates 2.2, polarmaker 1.4 (October 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line; corrupt files are refused instead of eating memory; polarmaker can rescale every second to a reference altitude (`--hoehe`). These are the versions used for the Valais polars and flow field.*
+*Current: flightstates 2.3, polarmaker 1.4 (October 2026). Straight segments carry the subtracted wind; every flight in `polars.npz` has a key to its `states.txt` line; corrupt files are refused instead of eating memory; polarmaker can rescale every second to a reference altitude (`--hoehe`). New in 2.3: `--hist` writes, next to the state lines, the per-flight vario histograms in 1-km/h airspeed bands — the raw material of a sink polar — so that one run of the segmenter yields everything an archive has to give. The Valais flow field (Korner 2026) was built from flightstates 2.2 lines, which 2.3 writes unchanged; the Valais polars were measured from 1-km/h histograms of exactly the kind `--hist` writes.*
 
 Reads IGC tracks. Writes one text line per flight: the flight as a sequence
 of segments. Two kinds, everything else is a number:
@@ -32,7 +32,12 @@ python3 polarmaker.py "flights/**/*.IGC" --out polars.csv              # 2  the 
 python3 flightstates.py --delta "flights/**/*.IGC" > states.txt        # 3  the segmented flights
 ```
 
-On a small archive of your own, step 1 can be skipped. What the pieces mean:
+On a small archive of your own, step 1 can be skipped. **If you run the
+segmenter for someone else who will measure the polars themselves, steps 1
+and 2 are not needed at all**: run step 3 with `--hist` (below), and a
+polar table is optional — without one, `w` is written with a constant own
+sink, and whoever receives the lines recomputes `w` with their own polars
+(the line is invertible, see below). What the pieces mean:
 
 * `"flights/**/*.IGC"` — replace `flights` with the folder holding your IGC
   files; `**` searches all subfolders. The quotes are required (the script
@@ -43,7 +48,19 @@ On a small archive of your own, step 1 can be skipped. What the pieces mean:
 * `> states.txt` — the segmenter prints to standard output; `>` puts it in
   a file.
 * `--polars FILE` (step 3) — which table to use; default: `polars.csv` next
-  to the script. `--id TEXT` — what to write in the first field (default `P`).
+  to the script. `--id TEXT` — what to write in the first field (default `P`);
+  `--id name` writes the file name of each flight, which lets the receiver
+  join the lines to other records of the archive.
+* `--hist FILE.npz` (step 3, since 2.3) — also write, per flight, the
+  histogram of the vario of all straight seconds in airspeed bands of
+  1 km/h (25–62 km/h), every second rescaled to 2000 m. These tables are
+  the raw material of a sink polar: the most frequent vario per band over
+  all flights of a type is its sink at that airspeed. No polar is applied,
+  no air computed, no position stored; the files hold counts, the glider
+  name and the key (day, time, start point) of the flight's line. Written
+  in chunks of 20 000 flights as `FILE_000.npz`, `FILE_001.npz`, …; about
+  15 kB per flight before compression, much less after. Header of
+  `flightstates.py` lists the arrays.
 
 `polars.csv` is one small table: per glider type, own sink at 25–65 km/h,
 measured as the mode of the vario per band (the most common air on a glide
@@ -91,18 +108,18 @@ computing polars **per situation** (region, height, strength of the day)
 instead of one universal polar per glider type, once the archive is large
 enough for that.
 
-Since 1.4 `--hoehe H` rescales every second to the reference altitude H
-before it is counted: airspeed and vario are both multiplied by
-sqrt(rho(h)/rho(H)), with the ISA density at the recorder's pressure
-altitude. At a constant angle of attack this is exactly how a glider's
-speed and sink change with density, so the table then reads as if every
-flight had been flown at H. Without the option nothing changes; the table
-header and the `.npz` (`hoehe`) say which it is.
-
 ## Running it for someone else
 
 If you hold an archive and someone asks you to compress it for them, the
-steps above are all there is to do, and **four files** come out:
+steps above are all there is to do. The simplest run, which needs no polar
+table and gives the receiver everything, is
+
+```bash
+python3 flightstates.py --delta --id name --hist hist.npz "flights/**/*.IGC" > states.txt
+```
+
+It writes `states.txt` and `hist_000.npz`, `hist_001.npz`, …; send those.
+With the full steps 1–3 instead, **four files** come out:
 
 | | |
 |---|---|
@@ -138,7 +155,7 @@ are what a later, finer one starts from.
 ## The output line
 
 ```
-# flightstates 2.2 polars=polars.csv sha1=2df03cffd1ef      <- file header, once
+# flightstates 2.1 polars=polars.csv sha1=2df03cffd1ef      <- file header, once
 id;glider;pol;yyyymmdd;SEG|SEG|...;END
 
 G (straight):   G,t,h,lat,lon,w,v,z,wind_kmh,wind_from_deg
@@ -150,7 +167,7 @@ END:              t,h,lat,lon
 segment's **beginning**; the end of one segment is the beginning of the next.
 `w` = vertical air movement in m/s, own sink removed. `v` = true airspeed
 km/h (mean over the seconds). `z` = flown path over chord, in percent.
-`wind_kmh, wind_from_deg` (since 2.1; 2.2 = same lines, plus the guards against corrupt files) = the wind that was subtracted to get
+`wind_kmh, wind_from_deg` (since 2.1) = the wind that was subtracted to get
 `v`, mean over the segment, speed and the direction it comes from — same
 convention as the drift of a `K` segment. Lines of 2.0 (without the two
 wind fields) are still read by `read_line()` / `read_line_delta()`.
@@ -193,7 +210,6 @@ All thresholds are constants at the top of `flightstates.py`:
 | minimum run | 20 s | recorder gaps >60 s | longest stretch kept |
 | circling piece | ~4 full turns | | |
 | coordinates | 5 decimals (~1 m) | altitude spikes >500 m | dropped |
-| refused files | >30 MB, time running backwards >3×, longest stretch >24 h | | |
 
 ## Check
 
@@ -201,16 +217,6 @@ All thresholds are constants at the top of `flightstates.py`:
 python3 verify.py flight.IGC --out check.png
 python3 chart.py  flight.IGC --out plate.png
 ```
-
-**Corrupt files** are refused, not processed: an IGC over 30 MB, one whose
-time stamps run backwards more than three times (one or two is a midnight
-crossing, more is garbage), or one whose longest contiguous stretch is
-longer than 24 hours. Each refusal is one line on stderr with the file
-name and the reason, like a file with too few fixes. Without these guards a
-recorder that wrote hours of garbage time stamps made the 1-Hz resampling
-allocate millions of seconds and eat the memory of the whole run (seen on
-a large archive; 2 GB for a single 7 MB file). Files that pass are
-processed exactly as before.
 
 `verify.py` draws the flight twice — from the IGC, and from the text line
 alone — and prints the errors. Typical: height mean 9 m (90 % under 22 m),
@@ -232,7 +238,7 @@ process the file line by line.
 
 ```bash
 for k in 1 2 3 4; do
-  python3 flightstates.py --delta --part=$k/4 "flights/**/*.IGC" > part$k.txt &
+  python3 flightstates.py --delta --id name --part=$k/4 --hist hist$k.npz "flights/**/*.IGC" > part$k.txt &
 done
 wait; cat part*.txt | xz -6 > states.txt.xz
 ```
@@ -243,7 +249,7 @@ wait; cat part*.txt | xz -6 > states.txt.xz
 |---|---|
 | `flightstates.py` | the segmenter (step 3), self-contained |
 | `polarmaker.py` | sink polar per glider type, with statistics (steps 1–2) |
-| `polars.csv`, `polars_stat.csv`, `polars.npz` | example output of steps 1–2 (one archive, 1628 flights); replace with your own |
+| `polars.csv`, `polars_stat.csv`, `polars.npz` | example output of steps 1–2 (one archive, 1628 flights); replace with your own — the Valais polars of 101 types are in the appendix of Korner (2026), not here |
 | `example_line.txt`, `example_line_delta.txt` | one flight of that archive as a text line, both forms |
 | `example_day.png`, `example_verify.png` | the same flight through `chart.py` and `verify.py` |
 | `verify.py`, `chart.py` | check picture, day plate |

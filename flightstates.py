@@ -56,6 +56,27 @@ Dependencies: numpy, pandas, scipy. Nothing else — this file runs on its own.
 
     python3 flightstates.py flights/*.IGC > states.txt
     python3 flightstates.py --delta flights/*.IGC > states.txt   (compact)
+    python3 flightstates.py --delta --hist hist.npz flights/*.IGC > states.txt
+
+--hist FILE (since 2.3): next to the state lines, the raw material for a sink
+polar, one small table per flight — the histogram of the vario of all straight
+seconds, in airspeed bands of 1 km/h (25 … 62 km/h, centre ± 0.5) on a vario
+grid from −6 to +4 m/s in steps of 0.05 m/s, every second rescaled to 2000 m
+(ISA density). Nothing is interpreted: no polar is applied, no air is
+computed, no position is stored. Flights are written in chunks of
+HIST_CHUNK to FILE_000.npz, FILE_001.npz, …; each file holds
+  key     (n, 4) int64   day, second of the first segment, lat and lon of the
+                         first segment × 10^5 — the same numbers that begin
+                         the flight's state line, so the two can be joined
+  id      (n,)   str     the first field of the state line (--id)
+  glider  (n,)   str     the glider name from the IGC header, as in the line
+  H       (n, 38, 200) uint16   seconds per airspeed band and vario bin
+  mitten  (38,)  int     band centres, km/h;   kanten (201,) float: bin edges
+  ref     ()     float   the reference altitude, m
+Seconds that count: not circling, vario −6 … +4 m/s, airspeed 18 … 75 km/h
+(after rescaling). The sink polar of a glider type is then the most frequent
+vario per band over all its flights — the measurement behind the Valais
+polars (Korner 2026), which can be repeated from these tables alone.
 
 The second field is the glider type, taken from the HFGTY record of the IGC
 header. It names no person, and it is what a sink polar has to be fitted per:
@@ -372,6 +393,65 @@ def wind_series(df, dh, net):
     return wx, wy, np.hypot(wx, wy) * 3.6
 
 
+# ---------------------------------------------------------------- polar histogram (--hist, 2.3)
+HIST_REF = 2000.0                         # m, reference altitude of the rescaling
+HIST_MITTEN = np.arange(25, 63)           # 1-km/h airspeed bands, centre ± 0.5
+HIST_KANTEN = np.arange(-6, 4.001, 0.05)  # vario grid, m/s
+HIST_CHUNK = 20000                        # flights per output file
+
+
+def dichte_faktor(alt, ref=HIST_REF):
+    """sqrt(rho(alt)/rho(ref)) in the ISA: airspeed and vario of a second at
+    `alt` become their values at `ref` when multiplied by it."""
+    alt = np.clip(np.asarray(alt, float), -500.0, 11000.0)
+    sig = lambda h: (1.0 - 2.25577e-5 * h) ** 4.2559
+    return np.sqrt(sig(alt) / sig(float(ref)))
+
+
+def polar_hist(df, wx, wy, circ):
+    """The flight's straight seconds counted per airspeed band and vario bin,
+    rescaled to HIST_REF. -> uint16 (len(HIST_MITTEN), len(HIST_KANTEN)-1)"""
+    n = len(df)
+    x, y = df["x"].to_numpy(), df["y"].to_numpy()
+    vx = np.zeros(n); vy = np.zeros(n)
+    vx[1:] = np.diff(x); vy[1:] = np.diff(y)
+    f = dichte_faktor(df["alt"].to_numpy())
+    eig = np.hypot(vx - wx, vy - wy) * 3.6 * f          # the second's own airspeed, unsmoothed
+    var = df["vario"].to_numpy() * f
+    m = (~circ) & (var > -6) & (var < 4) & (eig > 18) & (eig < 75)
+    H = np.zeros((len(HIST_MITTEN), len(HIST_KANTEN) - 1), np.uint16)
+    jb = np.floor(eig[m] + 0.5).astype(int) - int(HIST_MITTEN[0])
+    vv = var[m]
+    ok = (jb >= 0) & (jb < len(HIST_MITTEN))
+    for j in np.unique(jb[ok]):
+        H[j] = np.minimum(np.histogram(vv[ok & (jb == j)], bins=HIST_KANTEN)[0], 65535)
+    return H
+
+
+class HistWriter:
+    """Collects the per-flight tables and writes them in chunks of HIST_CHUNK."""
+    def __init__(self, base):
+        self.base = Path(base); self.n_file = 0; self.clear()
+
+    def clear(self):
+        self.key, self.id, self.glider, self.H = [], [], [], []
+
+    def add(self, key, kennung, glider, H):
+        self.key.append(key); self.id.append(kennung); self.glider.append(glider); self.H.append(H)
+        if len(self.H) >= HIST_CHUNK:
+            self.flush()
+
+    def flush(self):
+        if not self.H:
+            return
+        stem = self.base.name[:-4] if self.base.name.lower().endswith(".npz") else self.base.name
+        out = self.base.with_name(f"{stem}_{self.n_file:03d}.npz")
+        np.savez_compressed(out, key=np.array(self.key, dtype=np.int64), id=np.array(self.id), glider=np.array(self.glider),
+                            H=np.stack(self.H), mitten=HIST_MITTEN, kanten=HIST_KANTEN, ref=HIST_REF)
+        print(f"# {out.name}: {len(self.H)} flights", file=sys.stderr)
+        self.n_file += 1; self.clear()
+
+
 # ---------------------------------------------------------------- states
 def circling_per_second(df, net, wind_kmh):
     """First axis: is he circling or not."""
@@ -502,8 +582,9 @@ def to_runs(df, circ, hl=None, min_s=MIN_RUN_S, dh=None):
     return out
 
 
-def segments(path, polars=None):
-    """-> (day, glider, polar_source, segments, end, 1 Hz frame)."""
+def segments(path, polars=None, hist=False):
+    """-> (day, glider, polar_source, segments, end, 1 Hz frame);
+    with hist=True a 7th item: the polar histogram (polar_hist)."""
     day, glider, t0, raw = read_igc(path)
     df = resample_1hz(raw)
     t0 = t0 + float(df["t"].iloc[0])     # the kept block may start later
@@ -554,6 +635,8 @@ def segments(path, polars=None):
         out.append(s)
     end = (int(round(t0 + len(df) - 1)) % 86400, int(round(h[-1])),
             float(la[-1]), float(lo[-1]))
+    if hist:
+        return day, glider, src, out, end, df, polar_hist(df, wx, wy, circ)
     return day, glider, src, out, end, df
 
 
@@ -660,6 +743,10 @@ if __name__ == "__main__":
     kennung = "P"
     if "--id" in argv:
         i = argv.index("--id"); kennung = argv[i + 1]; del argv[i:i + 2]
+    histdat = None
+    if "--hist" in argv:
+        i = argv.index("--hist"); histdat = argv[i + 1]; del argv[i:i + 2]
+    hw = HistWriter(histdat) if histdat else None
     poldat = None
     if "--polars" in argv:
         i = argv.index("--polars"); poldat = argv[i + 1]; del argv[i:i + 2]
@@ -668,9 +755,9 @@ if __name__ == "__main__":
     polars = load_polars(poldat) if poldat else None
     if poldat:
         pruef = hashlib.sha1(open(poldat, "rb").read()).hexdigest()[:12]
-        print(f"# flightstates 2.2 polars={Path(poldat).name} sha1={pruef}")
+        print(f"# flightstates 2.3 polars={Path(poldat).name} sha1={pruef}")
     else:
-        print("# flightstates 2.2 polars=none (constant own sink "
+        print("# flightstates 2.3 polars=none (constant own sink "
               f"{CALM_SINK} m/s)")
     dateien = []
     for a in argv:
@@ -682,9 +769,16 @@ if __name__ == "__main__":
     dateien = sorted(einmal.values())[k - 1::n]
     for p in dateien:
         try:
-            day, glider, src, segs, end, _ = segments(p, polars)
+            r = segments(p, polars, hist=hw is not None)
+            day, glider, src, segs, end = r[:5]
             k_ = Path(p).stem if kennung == "name" else kennung
             f = line_delta if short else line
             print(f(k_, glider, src, day, segs, end))
+            if hw is not None and segs:
+                s0 = segs[0]
+                hw.add((int(day), int(s0["t"]), int(round(s0["la"] * 10 ** COORD_DECIMALS)), int(round(s0["lo"] * 10 ** COORD_DECIMALS))),
+                       k_, glider, r[6])
         except Exception as e:
             print(f"# {Path(p).name}: {type(e).__name__}: {e}", file=sys.stderr)
+    if hw is not None:
+        hw.flush()
